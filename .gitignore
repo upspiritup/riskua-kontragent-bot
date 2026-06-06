@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Runtime check history with Telegram user ids and lookup snapshots
+data/checks/

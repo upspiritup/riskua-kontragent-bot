@@ -1,0 +1,1 @@
+"""RiskUA Bot application package."""
