@@ -101,6 +101,60 @@ class BotResponseTests(unittest.TestCase):
         self.assertEqual(sources["prozorro"]["status"], "found")
         self.assertEqual(sources["prozorro"]["stats"]["procurements_count"], 2)
 
+    def test_found_company_response_shows_prozorro_block_when_analysis_exists(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(short_name='ТОВ "Тест"', edrpou="12345678", status="зареєстровано"),
+            prozorro_analysis=ProzorroAnalysis(
+                status="found",
+                stats=ProzorroStats(
+                    procurements_count=4,
+                    participations_count=4,
+                    wins_count=0,
+                    contracts_count=0,
+                    completed_contracts_count=0,
+                    terminated_contracts_count=0,
+                    disqualifications_count=0,
+                    win_rate_percent=0.0,
+                    last_participation_date="2025-03-10",
+                ),
+                info_notes=[
+                    "Сам факт участі не є ризиком.",
+                    "Перемог у Prozorro не знайдено; score не підвищено.",
+                ],
+                summary="Prozorro: участей 4, перемог 0, договорів 0, розірвань 0.",
+            ),
+        )
+
+        response = build_edrpou_response("12345678", result)
+
+        self.assertIn("Prozorro:", response)
+        self.assertIn("Участей: 4", response)
+        self.assertIn("Перемог: 0", response)
+        self.assertIn("Договорів: 0", response)
+        self.assertIn("Остання участь: 2025-03-10", response)
+        self.assertIn("Сам факт участі не є ризиком", response)
+        self.assertIn("Джерела: Opendatabot, Prozorro", response)
+
+    def test_found_company_response_omits_prozorro_block_when_analysis_missing(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(short_name='ТОВ "Тест"', edrpou="12345678", status="зареєстровано"),
+        )
+
+        response = build_edrpou_response("12345678", result)
+
+        self.assertNotIn("Prozorro:", response)
+        self.assertNotIn("Prozorro", response.split("Джерело: Opendatabot")[-1])
+
     def test_recommendation_text_changes_by_risk_level(self):
         from app.bot import build_recommendation_text
 

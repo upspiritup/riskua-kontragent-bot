@@ -19,6 +19,7 @@ from app.models.company_lookup import (
     CompanyData,
     CompanyLookupResult,
     FinancialYearData,
+    ProzorroAnalysis,
     RiskFlagSnapshot,
     RiskSummary,
     SourceDiagnostic,
@@ -257,6 +258,9 @@ def format_found_company(
     financial_lines = build_financial_lines(lookup_result, clarity_data)
     if financial_lines:
         lines.extend(["", "Фінансові дані:", *financial_lines])
+    prozorro_included = is_reportable_prozorro_analysis(lookup_result.prozorro_analysis)
+    if prozorro_included:
+        lines.extend(["", "Prozorro:", *build_prozorro_lines(lookup_result.prozorro_analysis)])
     assessment_reason_lines = build_assessment_reason_lines(
         lookup_result,
         final_risk,
@@ -289,6 +293,7 @@ def format_found_company(
                 tax_included=is_successful_tax(tax_data),
                 domain_reputation_included=is_checked_domain_reputation(domain_reputation_data),
                 contacts_summary=contacts_summary,
+                prozorro_included=prozorro_included,
             ),
             "Результат має інформаційний характер і не є юридичним висновком.",
         ]
@@ -324,6 +329,7 @@ def format_sources(
     tax_included: bool = False,
     domain_reputation_included: bool = False,
     contacts_summary: dict | None = None,
+    prozorro_included: bool = False,
 ) -> str:
     sources = ["Opendatabot"]
     if clarity_included:
@@ -338,10 +344,52 @@ def format_sources(
         sources.append("перевірка сайту")
     if contacts_summary_has_source(contacts_summary, "prat.ua/pat.ua"):
         sources.append("PAT.UA")
+    if prozorro_included:
+        sources.append("Prozorro")
     sources = dedupe_lines(sources)
     if len(sources) == 1:
         return f"Джерело: {sources[0]}"
     return f"Джерела: {', '.join(sources)}"
+
+
+def is_reportable_prozorro_analysis(prozorro_analysis: ProzorroAnalysis | None) -> bool:
+    return bool(prozorro_analysis and prozorro_analysis.status in {"found", "partial", "source_error"})
+
+
+def build_prozorro_lines(prozorro_analysis: ProzorroAnalysis | None) -> list[str]:
+    if not is_reportable_prozorro_analysis(prozorro_analysis):
+        return []
+
+    stats = prozorro_analysis.stats
+    lines = [
+        f"Закупівель: {stats.procurements_count}",
+        f"Участей: {stats.participations_count}",
+        f"Перемог: {stats.wins_count}",
+        f"Договорів: {stats.contracts_count}",
+        f"Завершених договорів: {stats.completed_contracts_count}",
+        f"Розірваних договорів: {stats.terminated_contracts_count}",
+        f"Дискваліфікацій: {stats.disqualifications_count}",
+    ]
+    lines.extend(optional_percent_field("Частка перемог", stats.win_rate_percent))
+    lines.extend(optional_percent_field("Частка розірвань", stats.termination_rate_percent))
+    lines.extend(optional_percent_field("Частка дискваліфікацій", stats.disqualification_rate_percent))
+    lines.extend(optional_field("Остання участь", stats.last_participation_date))
+    lines.extend(optional_field("Остання перемога", stats.last_win_date))
+    if prozorro_analysis.summary:
+        lines.append(prozorro_analysis.summary)
+    for note in prozorro_analysis.info_notes:
+        lines.append(f"Примітка: {note}")
+    if prozorro_analysis.status == "partial":
+        lines.append("Примітка: дані Prozorro часткові; варто перевірити їх вручну.")
+    if prozorro_analysis.status == "source_error":
+        lines.append("Примітка: дані Prozorro недоступні; варто перевірити їх вручну.")
+    return lines
+
+
+def optional_percent_field(label: str, value: float | None) -> list[str]:
+    if value is None:
+        return []
+    return [f"{label}: {value:.1f}%"]
 
 
 def format_user_risk_line(final_risk: dict) -> str:
