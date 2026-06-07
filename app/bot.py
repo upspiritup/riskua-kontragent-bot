@@ -1800,6 +1800,14 @@ def collect_source_risk_flags(
             and "website_source_unavailable" not in domain_reputation_data.get("risk_flags", [])
         ):
             flags.append({"type": "website_source_unavailable", "source": "domain_reputation"})
+    prozorro_analysis = result.prozorro_analysis
+    if prozorro_analysis:
+        for flag in prozorro_analysis.risk_flags:
+            prepared_flag = dict(flag)
+            prepared_flag.setdefault("source", "prozorro_analysis")
+            prepared_flag.setdefault("status", "found")
+            prepared_flag.setdefault("confidence", "medium")
+            flags.append(prepared_flag)
     flags.extend(collect_company_status_risk_flags(result, clarity_data, youcontrol_data))
     flags.extend(collect_company_status_mismatch_flags(result, clarity_data, youcontrol_data))
     flags.extend(collect_low_capital_debt_flags(result, flags))
@@ -2231,6 +2239,7 @@ def build_sources_snapshot(
     sources["debtors_registry"] = debtors_registry_data
     sources["tax"] = tax_data
     sources["domain_reputation"] = domain_reputation_data
+    sources["prozorro"] = result.prozorro_analysis.model_dump(mode="json") if result.prozorro_analysis else None
     sources["contacts_summary"] = contacts_summary
     sources["contact_sources"] = (contacts_summary or {}).get("source_results") if contacts_summary else None
     sources["court_analysis"] = {

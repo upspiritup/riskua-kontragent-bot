@@ -61,6 +61,46 @@ class BotResponseTests(unittest.TestCase):
         self.assertEqual(highest_risk_level(["info", "medium"]), "medium")
         self.assertEqual(highest_risk_level(["medium", "high", "info"]), "high")
 
+    def test_build_risk_summary_includes_prozorro_analysis_flags(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            prozorro_analysis=ProzorroAnalysis(
+                status="found",
+                stats=ProzorroStats(procurements_count=1),
+                risk_flags=[
+                    {
+                        "type": "prozorro_termination_found",
+                        "source": "prozorro_analysis",
+                        "status": "found",
+                        "confidence": "medium",
+                        "raw_text": "Виявлено розірвання договору в Prozorro.",
+                    }
+                ],
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+
+        self.assertEqual(summary.score, 25)
+        self.assertEqual(summary.reasons[0]["type"], "prozorro_termination_found")
+        self.assertEqual(summary.reasons[0]["sources"], ["prozorro_analysis"])
+
+    def test_build_sources_snapshot_includes_prozorro_analysis(self):
+        from app.bot import build_sources_snapshot
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+
+        analysis = ProzorroAnalysis(status="found", stats=ProzorroStats(procurements_count=2))
+        result = CompanyLookupResult(status="found", edrpou="12345678", prozorro_analysis=analysis)
+
+        sources = build_sources_snapshot(result, None, None)
+
+        self.assertEqual(sources["prozorro"]["status"], "found")
+        self.assertEqual(sources["prozorro"]["stats"]["procurements_count"], 2)
+
     def test_recommendation_text_changes_by_risk_level(self):
         from app.bot import build_recommendation_text
 

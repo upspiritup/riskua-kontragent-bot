@@ -230,6 +230,20 @@ class RiskScoringTests(unittest.TestCase):
         self.assertEqual([reason["weight"] for reason in result["reasons"]], [35, 20, 15])
         self.assertEqual(result["score"], 65)
 
+    def test_prozorro_duplicate_existing_flag_counts_once(self):
+        from app.services.risk_scoring import calculate_final_risk
+
+        result = calculate_final_risk(
+            [
+                {"type": "tax_debt_found", "source": "prozorro_analysis"},
+                {"type": "tax_debt_found", "source": "tax"},
+            ]
+        )
+
+        self.assertEqual(result["score"], 25)
+        self.assertEqual(len(result["reasons"]), 1)
+        self.assertEqual(result["reasons"][0]["sources"], ["prozorro_analysis", "tax"])
+
     def test_all_new_prozorro_flags_are_known(self):
         from app.services.risk_scoring import calculate_final_risk
 
