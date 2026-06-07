@@ -441,7 +441,7 @@ def normalize_procurements(data: Any) -> tuple[list[ProzorroProcurement], list[s
     for index, item in enumerate(raw_items):
         try:
             if isinstance(item, ProzorroProcurement):
-                procurements.append(item)
+                procurements.append(with_inferred_win(item))
             elif isinstance(item, dict):
                 procurements.append(normalize_procurement_dict(item))
             else:
@@ -455,37 +455,45 @@ def normalize_procurement_dict(item: dict[str, Any]) -> ProzorroProcurement:
     has_contract = first_bool(item, "has_contract")
     contract_terminated = first_bool(item, "contract_terminated")
     contract_value = first_float(item, "contract_value_uah", "contract_value", "award_value")
-    return ProzorroProcurement(
-        procurement_id=first_text(item, "procurement_id", "id", "tender_id"),
-        url=first_text(item, "url", "link"),
-        title=first_text(item, "title", "name", "procurement_title"),
-        cpv_code=first_text(item, "cpv_code", "cpv", "classification_id"),
-        cpv_name=first_text(item, "cpv_name", "classification_description"),
-        procedure_type=first_text(item, "procedure_type", "procurement_method_type"),
-        status=first_text(item, "status"),
-        expected_value_uah=first_float(item, "expected_value_uah", "expected_value", "value"),
-        bid_value_uah=first_float(item, "bid_value_uah", "bid_value", "proposal_value"),
-        contract_value_uah=contract_value,
-        buyer_name=first_text(item, "buyer_name", "procuring_entity", "buyer"),
-        buyer_edrpou=first_text(item, "buyer_edrpou", "buyer_identifier", "buyer_code"),
-        participants_count=first_int(item, "participants_count", "number_of_bids"),
-        participated=first_bool(item, "participated"),
-        won=first_bool(item, "won") or has_contract or contract_value is not None,
-        disqualified=first_bool(item, "disqualified"),
-        disqualification_reason=first_text(item, "disqualification_reason", "rejection_reason"),
-        has_contract=has_contract,
-        contract_completed=first_bool(item, "contract_completed"),
-        contract_terminated=contract_terminated,
-        termination_reason=first_text(item, "termination_reason"),
-        complaints_count=first_int(item, "complaints_count") or 0,
-        supplier_related_complaints_count=first_int(item, "supplier_related_complaints_count") or 0,
-        amendments_count=first_int(item, "amendments_count") or 0,
-        contract_amount_change_uah=first_float(item, "contract_amount_change_uah"),
-        contract_amount_change_percent=first_float(item, "contract_amount_change_percent"),
-        date=first_text(item, "date"),
-        award_date=first_text(item, "award_date"),
-        contract_date=first_text(item, "contract_date"),
+    return with_inferred_win(
+        ProzorroProcurement(
+            procurement_id=first_text(item, "procurement_id", "id", "tender_id"),
+            url=first_text(item, "url", "link"),
+            title=first_text(item, "title", "name", "procurement_title"),
+            cpv_code=first_text(item, "cpv_code", "cpv", "classification_id"),
+            cpv_name=first_text(item, "cpv_name", "classification_description"),
+            procedure_type=first_text(item, "procedure_type", "procurement_method_type"),
+            status=first_text(item, "status"),
+            expected_value_uah=first_float(item, "expected_value_uah", "expected_value", "value"),
+            bid_value_uah=first_float(item, "bid_value_uah", "bid_value", "proposal_value"),
+            contract_value_uah=contract_value,
+            buyer_name=first_text(item, "buyer_name", "procuring_entity", "buyer"),
+            buyer_edrpou=first_text(item, "buyer_edrpou", "buyer_identifier", "buyer_code"),
+            participants_count=first_int(item, "participants_count", "number_of_bids"),
+            participated=first_bool(item, "participated"),
+            won=first_bool(item, "won"),
+            disqualified=first_bool(item, "disqualified"),
+            disqualification_reason=first_text(item, "disqualification_reason", "rejection_reason"),
+            has_contract=has_contract,
+            contract_completed=first_bool(item, "contract_completed"),
+            contract_terminated=contract_terminated,
+            termination_reason=first_text(item, "termination_reason"),
+            complaints_count=first_int(item, "complaints_count") or 0,
+            supplier_related_complaints_count=first_int(item, "supplier_related_complaints_count") or 0,
+            amendments_count=first_int(item, "amendments_count") or 0,
+            contract_amount_change_uah=first_float(item, "contract_amount_change_uah"),
+            contract_amount_change_percent=first_float(item, "contract_amount_change_percent"),
+            date=first_text(item, "date"),
+            award_date=first_text(item, "award_date"),
+            contract_date=first_text(item, "contract_date"),
+        )
     )
+
+
+def with_inferred_win(procurement: ProzorroProcurement) -> ProzorroProcurement:
+    if procurement.won or not (procurement.has_contract or procurement.contract_value_uah is not None):
+        return procurement
+    return procurement.model_copy(update={"won": True})
 
 
 def calculate_stats(procurements: list[ProzorroProcurement]) -> ProzorroStats:
