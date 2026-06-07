@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from app.models.company_lookup import ProzorroAnalysis, ProzorroProcurement, ProzorroStats
@@ -58,6 +58,44 @@ DISQUALIFICATION_REASON_FLAGS = {
         "\u043a\u0432\u0430\u043b\u0456\u0444\u0456\u043a\u0430\u0446\u0456\u0439\u043d\u0438\u043c \u043a\u0440\u0438\u0442\u0435\u0440\u0456\u044f\u043c",
     ],
 }
+CPV_GROUPS = {
+    "medical": {
+        "cpv_prefixes": ("331", "336", "380"),
+        "keywords": (
+            "medical",
+            "laboratory",
+            "lab ",
+            "medicine",
+            "hospital",
+            "медич",
+            "лаборатор",
+            "лікар",
+        ),
+    },
+    "fuel": {
+        "cpv_prefixes": ("091", "092"),
+        "keywords": ("fuel", "gasoline", "diesel", "petrol", "палив", "бензин", "дизел"),
+    },
+    "food": {
+        "cpv_prefixes": ("15",),
+        "keywords": ("food", "meat", "bread", "milk", "харч", "продукт", "молок", "хліб"),
+    },
+    "construction": {
+        "cpv_prefixes": ("45",),
+        "keywords": ("construction", "repair", "будів", "ремонт"),
+    },
+    "office": {
+        "cpv_prefixes": ("301",),
+        "keywords": ("office", "paper", "stationery", "офіс", "папер", "канцеляр"),
+    },
+}
+KVED_GROUPS = {
+    "medical": ("медич", "фармац", "лаборатор", "лікар"),
+    "fuel": ("палив", "нафт", "бензин", "дизел"),
+    "food": ("харч", "продукт", "молок", "м'яс", "хліб"),
+    "construction": ("будів", "ремонт"),
+    "office": ("офіс", "папер", "канцеляр"),
+}
 PRESENCE_NOTE = (
     "Компанія фігурує у публічних закупівлях. Сам факт участі не є ризиком, "
     "але дозволяє оцінити досвід, дисципліну та виконання договорів."
@@ -96,7 +134,9 @@ def analyze_prozorro_data(
     if stats.participations_count >= 3 and stats.wins_count == 0:
         notes.append(NO_WINS_NOTE)
 
-    risk_flags = build_risk_flags(procurements, stats)
+    add_context_notes(notes, procurements, stats, checked_at, company_context or {})
+
+    risk_flags = build_risk_flags(procurements, stats, company_context or {})
 
     return ProzorroAnalysis(
         status="partial" if warnings else "found",
@@ -110,7 +150,11 @@ def analyze_prozorro_data(
     )
 
 
-def build_risk_flags(procurements: list[ProzorroProcurement], stats: ProzorroStats) -> list[dict[str, Any]]:
+def build_risk_flags(
+    procurements: list[ProzorroProcurement],
+    stats: ProzorroStats,
+    company_context: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     flags: list[dict[str, Any]] = []
     terminated = [item for item in procurements if item.contract_terminated]
     disqualified = [item for item in procurements if item.disqualified]
@@ -165,7 +209,107 @@ def build_risk_flags(procurements: list[ProzorroProcurement], stats: ProzorroSta
             if marker:
                 flags.append(risk_flag(flag_type, reason, marker))
 
+    if stats.contracts_count >= 5 and (
+        (stats.single_buyer_contract_share_percent or 0) >= 80
+        or (stats.single_buyer_value_share_percent or 0) >= 80
+    ):
+        flags.append(
+            risk_flag(
+                "single_buyer_concentration",
+                (
+                    "single buyer contract share: "
+                    f"{stats.single_buyer_contract_share_percent}%; value share: "
+                    f"{stats.single_buyer_value_share_percent}%"
+                ),
+                "single_buyer_share>=80",
+            )
+        )
+
+    if stats.wins_count >= 5 and rate(stats.low_competition_wins_count, stats.wins_count) >= 60:
+        flags.append(
+            risk_flag(
+                "low_competition_wins",
+                f"low competition wins: {stats.low_competition_wins_count} of {stats.wins_count}",
+                "wins>=5_and_low_competition_share>=60",
+            )
+        )
+
+    total_amendments = sum(item.amendments_count for item in procurements if item.has_contract or item.contract_terminated)
+    average_amendments = total_amendments / stats.contracts_count if stats.contracts_count else 0
+    if stats.contracts_count >= 5 and (total_amendments >= 10 or average_amendments >= 3):
+        flags.append(
+            risk_flag(
+                "frequent_contract_changes",
+                f"contract amendments: {total_amendments}; average: {round(average_amendments, 2)}",
+                "contracts>=5_and_amendments>=10_or_average>=3",
+            )
+        )
+
+    amount_increase = next(
+        (
+            item
+            for item in procurements
+            if item.contract_amount_change_percent is not None and item.contract_amount_change_percent >= 20
+        ),
+        None,
+    )
+    if amount_increase:
+        flags.append(
+            risk_flag(
+                "substantial_contract_amount_increase",
+                f"contract amount change percent: {amount_increase.contract_amount_change_percent}",
+                "contract_amount_change_percent>=20",
+            )
+        )
+
+    if stats.high_discount_bids_count >= 2:
+        flags.append(
+            risk_flag(
+                "possible_prozorro_dumping",
+                f"high discount bids: {stats.high_discount_bids_count}",
+                "bid_value<=50_percent_of_expected_value_count>=2",
+            )
+        )
+
+    if stats.supplier_related_complaints_count > 0:
+        flags.append(
+            risk_flag(
+                "supplier_related_prozorro_complaints",
+                f"supplier related complaints: {stats.supplier_related_complaints_count}",
+                "supplier_related_complaints_count>0",
+            )
+        )
+
+    if is_kved_mismatch(procurements, company_context or {}):
+        flags.append(
+            risk_flag(
+                "kved_mismatch",
+                "procurement CPV group does not match declared company activity",
+                "classified_cpv_group_not_in_company_activity_groups",
+            )
+        )
+
     return dedupe_flags(flags)
+
+
+def add_context_notes(
+    notes: list[str],
+    procurements: list[ProzorroProcurement],
+    stats: ProzorroStats,
+    checked_at: datetime,
+    company_context: dict[str, Any],
+) -> None:
+    if stats.contracts_count >= 5 and (
+        (stats.single_buyer_contract_share_percent or 0) >= 80
+        or (stats.single_buyer_value_share_percent or 0) >= 80
+    ):
+        notes.append("Значна частина контрактів пов'язана з одним замовником.")
+
+    if stats.last_participation_date and is_older_than_years(stats.last_participation_date, checked_at.date(), 3):
+        notes.append("Остання участь у Prozorro була давно; актуальний досвід може бути обмеженим.")
+
+    if company_context and cpv_kved_match_status(procurements, company_context) == "uncertain":
+        notes.append("Неможливо впевнено визначити відповідність CPV основним видам діяльності компанії.")
 
 
 def risk_flag(flag_type: str, raw_text: str, matched_pattern: str) -> dict[str, Any]:
@@ -198,6 +342,87 @@ def text_has_marker(text: str | None, markers: list[str]) -> str | None:
         if marker.casefold() in normalized:
             return marker
     return None
+
+
+def is_kved_mismatch(procurements: list[ProzorroProcurement], company_context: dict[str, Any]) -> bool:
+    return cpv_kved_match_status(procurements, company_context) == "mismatch"
+
+
+def cpv_kved_match_status(procurements: list[ProzorroProcurement], company_context: dict[str, Any]) -> str:
+    procurement_groups = classified_procurement_groups(procurements)
+    company_groups = classified_company_groups(company_context)
+    if not procurement_groups or not company_groups:
+        return "uncertain"
+
+    top_group, top_count = max(procurement_groups.items(), key=lambda item: item[1])
+    classified_count = sum(procurement_groups.values())
+    if top_group in company_groups:
+        return "match"
+    if classified_count >= 2 and top_count / classified_count >= 0.6:
+        return "mismatch"
+    return "uncertain"
+
+
+def classified_procurement_groups(procurements: list[ProzorroProcurement]) -> dict[str, int]:
+    groups: dict[str, int] = {}
+    for item in procurements:
+        group = classify_procurement_group(item)
+        if group:
+            groups[group] = groups.get(group, 0) + 1
+    return groups
+
+
+def classify_procurement_group(item: ProzorroProcurement) -> str | None:
+    cpv_digits = "".join(character for character in (item.cpv_code or "") if character.isdigit())
+    text = " ".join(part for part in [item.title, item.cpv_name] if part).casefold()
+    for group, rules in CPV_GROUPS.items():
+        if cpv_digits and any(cpv_digits.startswith(prefix) for prefix in rules["cpv_prefixes"]):
+            return group
+        if any(keyword.casefold() in text for keyword in rules["keywords"]):
+            return group
+    return None
+
+
+def classified_company_groups(company_context: dict[str, Any]) -> set[str]:
+    activity_parts: list[str] = []
+    for key in ("main_activity_name", "main_activity", "kved_name"):
+        value = company_context.get(key)
+        if value:
+            activity_parts.append(str(value))
+    additional = company_context.get("additional_activities") or []
+    if isinstance(additional, list):
+        for activity in additional:
+            if isinstance(activity, dict):
+                value = activity.get("name") or activity.get("activity_name")
+            else:
+                value = activity
+            if value:
+                activity_parts.append(str(value))
+
+    text = " ".join(activity_parts).casefold()
+    return {
+        group
+        for group, keywords in KVED_GROUPS.items()
+        if any(keyword.casefold() in text for keyword in keywords)
+    }
+
+
+def is_older_than_years(value: str, checked_date: date, years: int) -> bool:
+    parsed = parse_iso_date(value)
+    if not parsed:
+        return False
+    try:
+        threshold = checked_date.replace(year=checked_date.year - years)
+    except ValueError:
+        threshold = checked_date.replace(month=2, day=28, year=checked_date.year - years)
+    return parsed < threshold
+
+
+def parse_iso_date(value: str) -> date | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
 
 
 def normalize_procurements(data: Any) -> tuple[list[ProzorroProcurement], list[str], str | None]:
@@ -268,6 +493,17 @@ def calculate_stats(procurements: list[ProzorroProcurement]) -> ProzorroStats:
     disqualified = [item for item in procurements if item.disqualified]
     participation_dates = sorted(date for item in participations if (date := item.date or item.award_date or item.contract_date))
     win_dates = sorted(date for item in wins if (date := item.award_date or item.date or item.contract_date))
+    buyer_counts: dict[str, int] = {}
+    buyer_values: dict[str, float] = {}
+    total_contract_value = 0.0
+    for item in contracts:
+        if item.buyer_edrpou:
+            buyer_counts[item.buyer_edrpou] = buyer_counts.get(item.buyer_edrpou, 0) + 1
+            if item.contract_value_uah is not None:
+                buyer_values[item.buyer_edrpou] = buyer_values.get(item.buyer_edrpou, 0.0) + item.contract_value_uah
+        if item.contract_value_uah is not None:
+            total_contract_value += item.contract_value_uah
+
     return ProzorroStats(
         procurements_count=len(procurements),
         participations_count=len(participations),
@@ -284,6 +520,25 @@ def calculate_stats(procurements: list[ProzorroProcurement]) -> ProzorroStats:
         win_rate_percent=rate(len(wins), len(participations)),
         termination_rate_percent=rate(len(terminated), len(contracts)),
         disqualification_rate_percent=rate(len(disqualified), len(participations)),
+        single_buyer_contract_share_percent=rate(max(buyer_counts.values(), default=0), len(contracts)),
+        single_buyer_value_share_percent=(
+            round(max(buyer_values.values(), default=0.0) / total_contract_value * 100, 2)
+            if total_contract_value > 0
+            else None
+        ),
+        low_competition_wins_count=len(
+            [item for item in wins if item.participants_count is not None and item.participants_count <= 1]
+        ),
+        high_discount_bids_count=len(
+            [
+                item
+                for item in procurements
+                if item.expected_value_uah is not None
+                and item.expected_value_uah > 0
+                and item.bid_value_uah is not None
+                and item.bid_value_uah <= item.expected_value_uah * 0.5
+            ]
+        ),
     )
 
 

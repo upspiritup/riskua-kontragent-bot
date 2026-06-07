@@ -273,6 +273,130 @@ class ProzorroAnalysisTests(unittest.TestCase):
 
                 self.assertFlagTypes(analysis, [expected])
 
+    def test_clear_medical_cpv_kved_mismatch_adds_risk(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        analysis = analyze_prozorro_data(
+            [
+                {"id": "UA-MED-1", "title": "Лабораторне обладнання", "cpv": "33100000-1"},
+                {"id": "UA-MED-2", "name": "Медичні вироби", "cpv": "38000000-5"},
+                {"id": "UA-MED-3", "title": "Медичні матеріали", "cpv": "33140000-3"},
+            ],
+            company_context={
+                "main_activity_name": "Оптова торгівля паливом",
+                "additional_activities": [],
+            },
+        )
+
+        self.assertIn("kved_mismatch", self.flag_types(analysis))
+
+    def test_uncertain_cpv_kved_matching_adds_note_but_no_risk(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        analysis = analyze_prozorro_data(
+            [{"id": "UA-GEN-1", "title": "Послуги", "cpv_name": "Різні послуги"}],
+            company_context={"main_activity_name": "Неспеціалізована оптова торгівля"},
+        )
+
+        self.assertNotIn("kved_mismatch", self.flag_types(analysis))
+        self.assertTrue(any("відповідність CPV" in note for note in analysis.info_notes))
+
+    def test_single_buyer_concentration_adds_risk_and_note(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        analysis = analyze_prozorro_data(
+            [
+                {
+                    "id": f"UA-BUYER-{index}",
+                    "participated": True,
+                    "won": True,
+                    "has_contract": True,
+                    "buyer_edrpou": "12345678",
+                    "contract_value": 100000,
+                }
+                for index in range(5)
+            ]
+        )
+
+        self.assertIn("single_buyer_concentration", self.flag_types(analysis))
+        self.assertTrue(any("одним замовником" in note for note in analysis.info_notes))
+
+    def test_low_competition_wins_adds_risk(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        analysis = analyze_prozorro_data(
+            [
+                {
+                    "id": f"UA-LOW-COMP-{index}",
+                    "participated": True,
+                    "won": True,
+                    "participants_count": 1,
+                }
+                for index in range(5)
+            ]
+        )
+
+        self.assertIn("low_competition_wins", self.flag_types(analysis))
+
+    def test_frequent_amendments_and_substantial_amount_increase_add_risks(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        procurements = [
+            {
+                "id": f"UA-CHANGES-{index}",
+                "has_contract": True,
+                "amendments_count": 3,
+            }
+            for index in range(5)
+        ]
+        procurements.append(
+            {
+                "id": "UA-INCREASE-1",
+                "has_contract": True,
+                "contract_amount_change_percent": 25,
+            }
+        )
+
+        analysis = analyze_prozorro_data(procurements)
+
+        self.assertIn("frequent_contract_changes", self.flag_types(analysis))
+        self.assertIn("substantial_contract_amount_increase", self.flag_types(analysis))
+
+    def test_repeated_deep_discounts_add_dumping_risk_but_isolated_discount_does_not(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        repeated_analysis = analyze_prozorro_data(
+            [
+                {"id": "UA-DISC-1", "expected_value": 100000, "proposal_value": 50000},
+                {"id": "UA-DISC-2", "expected_value": 200000, "proposal_value": 90000},
+            ]
+        )
+        isolated_analysis = analyze_prozorro_data(
+            [{"id": "UA-DISC-1", "expected_value": 100000, "proposal_value": 50000}]
+        )
+
+        self.assertIn("possible_prozorro_dumping", self.flag_types(repeated_analysis))
+        self.assertNotIn("possible_prozorro_dumping", self.flag_types(isolated_analysis))
+
+    def test_supplier_related_complaints_add_risk_but_generic_complaints_do_not(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        supplier_analysis = analyze_prozorro_data(
+            [{"id": "UA-COMPLAINT-1", "supplier_related_complaints_count": 1}]
+        )
+        generic_analysis = analyze_prozorro_data([{"id": "UA-COMPLAINT-2", "complaints_count": 3}])
+
+        self.assertIn("supplier_related_prozorro_complaints", self.flag_types(supplier_analysis))
+        self.assertNotIn("supplier_related_prozorro_complaints", self.flag_types(generic_analysis))
+
+    def test_old_procurements_add_note_but_no_risk(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        analysis = analyze_prozorro_data([{"id": "UA-OLD-1", "participated": True, "date": "2020-01-01"}])
+
+        self.assertEqual(self.flag_types(analysis), [])
+        self.assertTrue(any("була давно" in note for note in analysis.info_notes))
+
 
 if __name__ == "__main__":
     unittest.main()
