@@ -20,6 +20,8 @@ from app.models.company_lookup import (
     CompanyLookupResult,
     FinancialYearData,
     ProzorroAnalysis,
+    ProzorroSaleAnalysis,
+    ProzorroSearchSummary,
     RiskFlagSnapshot,
     RiskSummary,
     SourceDiagnostic,
@@ -48,6 +50,7 @@ from app.services.opendatabot_lookup import (
     lookup_company,
 )
 from app.services.prozorro_lookup import lookup_prepared_prozorro
+from app.services.prozorro_sale_lookup import lookup_prozorro_sale_by_edrpou
 from app.services.risk_scoring import RISK_FLAG_ALIASES, calculate_final_risk
 from app.services.tax_lookup import fetch_tax_status
 from app.services.youcontrol_lookup import fetch_youcontrol_company
@@ -107,6 +110,8 @@ STOP_BUTTON_TEXT = "🛑 Зупинити"
 INFO_BUTTON_TEXT = "ℹ️ Як працює"
 ANALYSIS_TIMEOUT_SECONDS = 60.0
 SHOW_TECHNICAL_LIMITATIONS = False
+LOW_AUTHORIZED_CAPITAL_THRESHOLD_UAH = 5001
+PROZORRO_UNCONFIRMED_SEARCH_NOISE_THRESHOLD = 1000
 YOUCONTROL_RISK_DEFINITIONS = {
     "company_not_found": (
         "medium",
@@ -198,7 +203,7 @@ def format_found_company(
     company = lookup_result.company_data or CompanyData()
     clarity_company = get_clarity_company(clarity_data)
     company_name = company.short_name or company.full_name or (clarity_company.name if clarity_company else None)
-    status = company.status or (clarity_company.status if clarity_company else None)
+    status = format_company_status_for_report(lookup_result, clarity_data, youcontrol_data)
     registration_date = company.registration_date or (clarity_company.registration_date if clarity_company else None)
     director = company.director or (clarity_company.director if clarity_company else None)
     kved = format_kved(company) or (clarity_company.main_activity if clarity_company else None)
@@ -226,8 +231,7 @@ def format_found_company(
         domain_reputation_data,
         contacts_summary,
     )
-    court_decision_lines = build_court_decision_lines(lookup_result)
-    court_decision_block = ["", "Судові документи:", *court_decision_lines] if court_decision_lines else []
+    court_document_lines = build_court_document_block_lines(lookup_result)
     clarity_used_for_company = bool(
         clarity_company
         and (
@@ -251,7 +255,7 @@ def format_found_company(
     base_lines.extend(optional_field("Адреса", company.address))
     base_lines.extend(optional_field("КВЕД", kved))
     base_lines.extend(optional_field("ПДВ-статус", company.vat_status))
-    base_lines.extend(optional_field("Тендери", format_tenders(company)))
+    base_lines.extend(optional_field("Тендери за відкритими джерелами", format_tenders(company)))
     if base_lines:
         lines.extend(["", "Короткі базові дані:", *base_lines])
     if contact_lines:
@@ -259,12 +263,18 @@ def format_found_company(
     financial_lines = build_financial_lines(lookup_result, clarity_data)
     if financial_lines:
         lines.extend(["", "Фінансові дані:", *financial_lines])
-    prozorro_source_included = is_reportable_prozorro_analysis(lookup_result.prozorro_analysis)
+    prozorro_source_label = get_prozorro_source_label(lookup_result.prozorro_analysis)
+    prozorro_source_included = prozorro_source_label is not None
     prozorro_report_mode = get_prozorro_report_mode(lookup_result)
     log_prozorro_report_mode(prozorro_report_mode, lookup_result.prozorro_analysis, prozorro_source_included)
     prozorro_lines = build_prozorro_section_lines(lookup_result)
     if prozorro_lines:
         lines.extend(["", "Prozorro:", *prozorro_lines])
+    prozorro_sale_lines = build_prozorro_sale_section_lines(lookup_result.prozorro_sale_analysis)
+    if prozorro_sale_lines:
+        lines.extend(["", "Prozorro.Sale:", *prozorro_sale_lines])
+    if court_document_lines:
+        lines.extend(["", "Судові документи:", *court_document_lines])
     assessment_reason_lines = build_assessment_reason_lines(
         lookup_result,
         final_risk,
@@ -280,24 +290,22 @@ def format_found_company(
     lines.extend(
         [
             "",
-            format_user_risk_line(final_risk),
-            "",
             "Причини оцінки:",
             *(assessment_reason_lines or ["• Суттєвих ризикових причин у доступних джерелах не виявлено."]),
-            *court_decision_block,
             *technical_limitation_lines,
             "",
-            "Рекомендація: перед передоплатою",
-            build_recommendation_text(final_risk["level"]),
+            format_user_risk_line(final_risk),
             "",
             format_sources(
                 clarity_included=bool(clarity_data and clarity_data.status in {CLARITY_FOUND, CLARITY_PARTIAL}) or clarity_used_for_company,
                 youcontrol_included=is_successful_youcontrol(youcontrol_data),
                 debtors_registry_included=is_successful_debtors_registry(debtors_registry_data),
                 tax_included=is_successful_tax(tax_data),
-                domain_reputation_included=is_checked_domain_reputation(domain_reputation_data),
+                domain_reputation_included=is_useful_domain_reputation_source(domain_reputation_data),
                 contacts_summary=contacts_summary,
-                prozorro_included=prozorro_source_included,
+                prozorro_source_label=prozorro_source_label,
+                prozorro_sale_included=is_reportable_prozorro_sale_analysis(lookup_result.prozorro_sale_analysis),
+                court_included=has_court_source(lookup_result),
             ),
             "Результат має інформаційний характер і не є юридичним висновком.",
         ]
@@ -311,6 +319,19 @@ def get_clarity_company(clarity_data: ClarityData | None):
     return clarity_data.company
 
 
+def format_company_status_for_report(
+    lookup_result: CompanyLookupResult,
+    clarity_data: ClarityData | None = None,
+    youcontrol_data: dict | None = None,
+) -> str | None:
+    statuses = collect_company_statuses(lookup_result, clarity_data, youcontrol_data)
+    if has_company_status_conflict(statuses):
+        return "потребує ручної перевірки статусу"
+    company = lookup_result.company_data
+    clarity_company = get_clarity_company(clarity_data)
+    return (company.status if company else None) or (clarity_company.status if clarity_company else None)
+
+
 def format_kved(company: CompanyData) -> str | None:
     if company.main_activity_code and company.main_activity_name:
         return f"{company.main_activity_code} — {company.main_activity_name}"
@@ -318,10 +339,11 @@ def format_kved(company: CompanyData) -> str | None:
 
 
 def format_tenders(company: CompanyData) -> str | None:
-    if company.tenders_text:
-        return company.tenders_text
     if company.tenders_count is not None:
-        return f"{company.tenders_count} закупівель"
+        return format_int(company.tenders_count)
+    if company.tenders_text:
+        count = parse_first_int_from_text(company.tenders_text)
+        return format_int(count) if count is not None else company.tenders_text
     return None
 
 
@@ -333,7 +355,9 @@ def format_sources(
     tax_included: bool = False,
     domain_reputation_included: bool = False,
     contacts_summary: dict | None = None,
-    prozorro_included: bool = False,
+    prozorro_source_label: str | None = None,
+    prozorro_sale_included: bool = False,
+    court_included: bool = False,
 ) -> str:
     sources = ["Opendatabot"]
     if clarity_included:
@@ -348,12 +372,16 @@ def format_sources(
         sources.append("перевірка сайту")
     if contacts_summary_has_source(contacts_summary, "prat.ua/pat.ua"):
         sources.append("PAT.UA")
-    if prozorro_included:
-        sources.append("Prozorro")
+    if prozorro_source_label:
+        sources.append(prozorro_source_label)
+    if prozorro_sale_included:
+        sources.append("Prozorro.Sale")
+    if court_included:
+        sources.append("Судові джерела")
     sources = dedupe_lines(sources)
     if len(sources) == 1:
         return f"Джерело: {sources[0]}"
-    return f"Джерела: {', '.join(sources)}"
+    return f"Джерела: {', '.join(sources)} та інші джерела"
 
 
 def is_reportable_prozorro_analysis(prozorro_analysis: ProzorroAnalysis | None) -> bool:
@@ -364,6 +392,27 @@ def is_reportable_prozorro_analysis(prozorro_analysis: ProzorroAnalysis | None) 
     )
 
 
+def is_prozorro_source_included(prozorro_analysis: ProzorroAnalysis | None) -> bool:
+    return is_reportable_prozorro_analysis(prozorro_analysis) or has_prozorro_search_summary(prozorro_analysis)
+
+
+def get_prozorro_source_label(prozorro_analysis: ProzorroAnalysis | None) -> str | None:
+    if is_reportable_prozorro_analysis(prozorro_analysis):
+        return "Prozorro"
+    if has_prozorro_search_summary(prozorro_analysis):
+        confirmed_count = prozorro_analysis.search_summary.confirmed_participation_count or 0
+        return "Prozorro" if confirmed_count > 0 else "Prozorro search"
+    return None
+
+
+def has_prozorro_search_summary(prozorro_analysis: ProzorroAnalysis | None) -> bool:
+    return bool(
+        prozorro_analysis
+        and prozorro_analysis.search_summary
+        and (prozorro_analysis.search_summary.total_count or 0) > 0
+    )
+
+
 def prozorro_records_count(prozorro_analysis: ProzorroAnalysis | None) -> int:
     return len(prozorro_analysis.procurements) if prozorro_analysis else 0
 
@@ -371,6 +420,8 @@ def prozorro_records_count(prozorro_analysis: ProzorroAnalysis | None) -> int:
 def get_prozorro_report_mode(lookup_result: CompanyLookupResult) -> str:
     if is_reportable_prozorro_analysis(lookup_result.prozorro_analysis):
         return "detailed"
+    if has_prozorro_search_summary(lookup_result.prozorro_analysis):
+        return "summary"
     status = str(lookup_result.prozorro_analysis.status) if lookup_result.prozorro_analysis else ""
     if status in {"source_error", "unavailable"}:
         return "source_error"
@@ -392,13 +443,191 @@ def log_prozorro_report_mode(
 def build_prozorro_section_lines(lookup_result: CompanyLookupResult) -> list[str]:
     if is_reportable_prozorro_analysis(lookup_result.prozorro_analysis):
         return build_prozorro_lines(lookup_result.prozorro_analysis)
+    if has_prozorro_search_summary(lookup_result.prozorro_analysis):
+        return build_prozorro_search_summary_lines(lookup_result.prozorro_analysis)
     return build_prozorro_tender_fallback_lines(lookup_result.company_data)
+
+
+def is_reportable_prozorro_sale_analysis(prozorro_sale_analysis: ProzorroSaleAnalysis | None) -> bool:
+    return bool(
+        prozorro_sale_analysis
+        and prozorro_sale_analysis.status == "found"
+        and (prozorro_sale_analysis.risky_auctions or prozorro_sale_analysis.informational_mentions)
+    )
+
+
+def build_prozorro_sale_section_lines(prozorro_sale_analysis: ProzorroSaleAnalysis | None) -> list[str]:
+    if not is_reportable_prozorro_sale_analysis(prozorro_sale_analysis):
+        return []
+
+    lines: list[str] = []
+    if prozorro_sale_analysis.risky_auctions:
+        lines.append(f"⚠️ Знайдено ризикові аукціони: {len(prozorro_sale_analysis.risky_auctions)}")
+        for index, auction in enumerate(prozorro_sale_analysis.risky_auctions[:5], start=1):
+            auction_id = auction.auction_id or "без ID"
+            lines.append(f"{index}. {auction_id} — {auction.risk}")
+            lines.append(f"   {auction.url}")
+    debtor_mentions = [
+        mention
+        for mention in prozorro_sale_analysis.informational_mentions[:5]
+        if mention.role == "debtor_mention"
+    ]
+    if debtor_mentions:
+        lines.append(
+            "Prozorro.Sale: компанія згадується у складі дебіторської заборгованості банкрута. "
+            "Це не означає банкрутство самої компанії."
+        )
+        for mention in debtor_mentions:
+            auction_id = mention.auction_id or "без ID"
+            lines.append(f"{auction_id}: {mention.url}")
+    general_mentions = [
+        mention
+        for mention in prozorro_sale_analysis.informational_mentions[:5]
+        if mention.role != "debtor_mention"
+    ]
+    if general_mentions:
+        lines.append(
+            "Prozorro.Sale: знайдено аукціони з участю/згадкою компанії. "
+            "Негативної дії саме з боку компанії не підтверджено."
+        )
+        for mention in general_mentions:
+            auction_id = mention.auction_id or "без ID"
+            lines.append(f"{auction_id}: {mention.url}")
+    return lines
+
+
+def build_prozorro_search_summary_lines(prozorro_analysis: ProzorroAnalysis | None) -> list[str]:
+    if not has_prozorro_search_summary(prozorro_analysis):
+        return []
+    search_summary = prozorro_analysis.search_summary
+    total_count = search_summary.total_count or 0
+    checked_count = search_summary.checked_count
+    confirmed_participation_count = search_summary.confirmed_participation_count or 0
+    lines = [
+        f"Результатів у пошуку Prozorro: {format_int(total_count)}.",
+        f"Перевірено у видачі: {format_int(checked_count)}.",
+        (
+            "Підтверджено участь компанії серед перевірених: "
+            f"{format_int(confirmed_participation_count)}."
+        ),
+        build_prozorro_search_risk_scan_line(
+            search_summary.items,
+            confirmed_participation_count=confirmed_participation_count,
+        ),
+    ]
+    if confirmed_participation_count > 0:
+        lines.append(build_prozorro_search_participation_line(confirmed_participation_count))
+    lines.extend(build_prozorro_search_text_match_note_lines(confirmed_participation_count))
+    return lines
+
+
+def build_prozorro_search_participation_line(confirmed_participation_count: int) -> str:
+    if confirmed_participation_count <= 0:
+        return "Участей/перемог/договорів: серед перевірених результатів участь компанії не підтверджена."
+    return "Участей/перемог/договорів: дані уточнюються за деталями закупівель."
+
+
+def build_prozorro_search_text_match_note_lines(confirmed_participation_count: int) -> list[str]:
+    if confirmed_participation_count > 0:
+        return []
+    return ["Частина результатів пошуку може бути текстовими збігами, а не закупівлями цієї компанії."]
+
+
+def build_prozorro_search_item_lines(items: list[dict]) -> list[str]:
+    if not items:
+        return []
+
+    lines = ["Перші закупівлі у видачі:"]
+    for index, item in enumerate(items[:3], start=1):
+        tender_id = first_nonempty_text(item, "tenderID", "id") or "без ID"
+        title = truncate_text(first_nonempty_text(item, "title") or "без назви", 120)
+        lines.append(f"{index}. {tender_id} — {title}")
+
+        details: list[str] = []
+        status = first_nonempty_text(item, "status")
+        buyer_name = first_nonempty_text(item, "buyer_name", "buyer")
+        expected_value = item.get("expected_value_uah")
+        if status:
+            details.append(f"Статус: {status}")
+        if buyer_name:
+            details.append(f"замовник: {truncate_text(buyer_name, 80)}")
+        if isinstance(expected_value, int | float):
+            details.append(f"очікувана сума: {format_uah(expected_value)}")
+        if details:
+            lines.append("; ".join(details) + ".")
+    return lines
+
+
+def build_prozorro_search_risk_scan_line(items: list[dict], *, confirmed_participation_count: int = 1) -> str:
+    checked_count = len(items)
+    marker_count = count_prozorro_search_potential_critical_signals(items)
+    if marker_count:
+        if confirmed_participation_count <= 0:
+            return (
+                f"У пошуковій видачі є потенційні маркери: {marker_count}, але участь компанії "
+                "в цих результатах не підтверджена, тому вони не враховані як ризик."
+            )
+        return f"У перших {checked_count} результатах пошуку знайдено явні маркери: {marker_count}."
+    if confirmed_participation_count <= 0:
+        return "У перших перевірених результатах не знайдено підтверджених ризикових ознак, пов’язаних із компанією."
+    return (
+        f"У перших {checked_count} результатах пошуку не знайдено явних маркерів: "
+        "скасування, розірвання, скарги або моніторингу."
+    )
+
+
+def count_prozorro_search_potential_critical_signals(items: list[dict]) -> int:
+    return sum(1 for item in items if has_prozorro_search_potential_critical_signal(item))
+
+
+def has_prozorro_search_potential_critical_signal(item: dict) -> bool:
+    marker_codes = item.get("risk_marker_codes")
+    if isinstance(marker_codes, list) and marker_codes:
+        return True
+    text_parts = [
+        first_nonempty_text(item, "status"),
+        first_nonempty_text(item, "title"),
+        first_nonempty_text(item, "description"),
+    ]
+    text = " ".join(part for part in text_parts if part).casefold()
+    return any(
+        marker in text
+        for marker in (
+            "cancelled",
+            "unsuccessful",
+            "terminated",
+            "complaint",
+            "monitoring",
+            "скасован",
+            "відмін",
+            "розірван",
+            "скарг",
+            "моніторинг",
+        )
+    )
+
+
+def first_nonempty_text(item: dict, *keys: str) -> str | None:
+    for key in keys:
+        value = item.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def truncate_text(text: str, max_length: int) -> str:
+    if len(text) <= max_length:
+        return text
+    return text[: max(0, max_length - 1)].rstrip() + "…"
 
 
 def build_prozorro_tender_fallback_lines(company: CompanyData | None) -> list[str]:
     if company is None:
         return []
-    tenders_text = format_tenders(company)
+    tenders_text = format_tenders_for_prozorro_fallback(company)
     if not tenders_text:
         return []
     return [
@@ -408,26 +637,78 @@ def build_prozorro_tender_fallback_lines(company: CompanyData | None) -> list[st
     ]
 
 
+def format_tenders_for_prozorro_fallback(company: CompanyData) -> str | None:
+    if company.tenders_count is not None:
+        return f"{format_int(company.tenders_count)} {plural_uk(company.tenders_count, 'тендер', 'тендери', 'тендерів')}"
+    return company.tenders_text
+
+
 def build_prozorro_lines(prozorro_analysis: ProzorroAnalysis | None) -> list[str]:
     if not is_reportable_prozorro_analysis(prozorro_analysis):
         return []
 
     stats = prozorro_analysis.stats
-    lines = [
-        f"Закупівель: {stats.procurements_count}",
-        f"Участей: {stats.participations_count}",
-        f"Перемог: {stats.wins_count}",
-        f"Договорів: {stats.contracts_count}",
-        f"Завершених договорів: {stats.completed_contracts_count}",
-        f"Розірваних договорів: {stats.terminated_contracts_count}",
-        f"Дискваліфікацій: {stats.disqualifications_count}",
+    lines: list[str] = []
+    search_summary = prozorro_analysis.search_summary
+    confirmed_search_count = search_summary.confirmed_participation_count or 0 if search_summary else 0
+    if prozorro_analysis.search_summary:
+        lines.extend(
+            [
+                f"Результатів у пошуку Prozorro: {format_int(search_summary.total_count or 0)}.",
+                f"Перевірено у видачі: {format_int(search_summary.checked_count)}.",
+            ]
+        )
+        if confirmed_search_count > 0:
+            lines.append(
+                "Підтверджено закупівель із компанією: "
+                f"{format_int(confirmed_search_count)}."
+            )
+            lines.extend(build_prozorro_role_lines(search_summary))
+    search_confirmed_count = (
+        prozorro_analysis.search_summary.confirmed_participation_count
+        if prozorro_analysis.search_summary
+        else None
+    )
+    stats_participation_label = (
+        "Участей у деталізованій статистиці"
+        if search_confirmed_count is not None and search_confirmed_count != stats.participations_count
+        else "Участей"
+    )
+    stat_items: list[tuple[str, int | float | None]] = [
+        (stats_participation_label, stats.participations_count),
+        ("Перемог", stats.wins_count),
+        ("Договорів", stats.contracts_count),
+        ("Завершених договорів", stats.completed_contracts_count),
+        ("Розірваних договорів", stats.terminated_contracts_count),
+        ("Дискваліфікацій", stats.disqualifications_count),
     ]
+    if not (search_summary and confirmed_search_count > 0):
+        stat_items.insert(0, ("Закупівель", stats.procurements_count))
+    lines.extend(
+        nonzero_stat_lines(stat_items)
+    )
+    if search_confirmed_count is not None and search_confirmed_count != stats.procurements_count:
+        lines.append("Примітка: кількість підтверджених закупівель і деталізована статистика можуть відрізнятися.")
+    buyer_only = is_prozorro_buyer_only_summary(search_summary)
+    if stats.complaints_count:
+        complaints_label = "Скарг/вимог у закупівлях як замовника" if buyer_only else "Скарг/вимог"
+        lines.append(f"{complaints_label}: {stats.complaints_count}")
+    monitoring_count = count_prozorro_search_marker_items(
+        prozorro_analysis.search_summary,
+        "monitoring",
+        confirmed_only=True,
+    )
+    if monitoring_count:
+        monitoring_label = "Моніторингів закупівель як замовника" if buyer_only else "Моніторингів"
+        lines.append(f"{monitoring_label}: {monitoring_count}")
     lines.extend(optional_percent_field("Частка перемог", stats.win_rate_percent))
     lines.extend(optional_percent_field("Частка розірвань", stats.termination_rate_percent))
     lines.extend(optional_percent_field("Частка дискваліфікацій", stats.disqualification_rate_percent))
     lines.extend(optional_field("Остання участь", stats.last_participation_date))
     lines.extend(optional_field("Остання перемога", stats.last_win_date))
-    if prozorro_analysis.summary:
+    lines.extend(build_prozorro_negative_fact_summary_lines(prozorro_analysis))
+    lines.extend(build_prozorro_detected_signal_lines(prozorro_analysis))
+    if should_show_prozorro_analysis_summary(prozorro_analysis):
         lines.append(prozorro_analysis.summary)
     for note in prozorro_analysis.info_notes:
         lines.append(f"Примітка: {note}")
@@ -438,8 +719,126 @@ def build_prozorro_lines(prozorro_analysis: ProzorroAnalysis | None) -> list[str
     return lines
 
 
+def build_prozorro_role_lines(search_summary: ProzorroSearchSummary) -> list[str]:
+    if not any(
+        (
+            search_summary.participant_count,
+            search_summary.winner_count,
+            search_summary.supplier_contract_count,
+            search_summary.buyer_count,
+        )
+    ):
+        return []
+    return [
+        "Ролі:",
+        f"• учасник: {format_int(search_summary.participant_count)}",
+        f"• переможець/постачальник: {format_int(max(search_summary.winner_count, search_summary.supplier_contract_count))}",
+        f"• замовник: {format_int(search_summary.buyer_count)}",
+    ]
+
+
+def is_prozorro_buyer_only_summary(search_summary: ProzorroSearchSummary | None) -> bool:
+    return bool(
+        search_summary
+        and search_summary.buyer_count > 0
+        and search_summary.participant_count == 0
+        and search_summary.winner_count == 0
+        and search_summary.supplier_contract_count == 0
+    )
+
+
+def should_show_prozorro_analysis_summary(prozorro_analysis: ProzorroAnalysis) -> bool:
+    return bool(prozorro_analysis.summary and not prozorro_analysis.search_summary)
+
+
+def build_prozorro_negative_fact_summary_lines(prozorro_analysis: ProzorroAnalysis) -> list[str]:
+    stats = prozorro_analysis.stats
+    complaints_or_monitoring_count = stats.complaints_count + count_prozorro_search_marker_items(
+        prozorro_analysis.search_summary,
+        "monitoring",
+        confirmed_only=True,
+    )
+    buyer_only = is_prozorro_buyer_only_summary(prozorro_analysis.search_summary)
+    if buyer_only and not any((stats.terminated_contracts_count, stats.disqualifications_count)):
+        if complaints_or_monitoring_count > 0:
+            return [
+                "Сигнали серед закупівель як замовника:",
+                f"• скарги/моніторинги: {format_int(complaints_or_monitoring_count)}",
+            ]
+        return ["Висновок: підтверджених негативних Prozorro-фактів серед перевірених закупівель не знайдено."]
+    if not any(
+        (
+            stats.terminated_contracts_count,
+            stats.disqualifications_count,
+            complaints_or_monitoring_count,
+        )
+    ):
+        return ["Висновок: підтверджених негативних Prozorro-фактів серед перевірених закупівель не знайдено."]
+    lines = ["Негативні факти серед перевірених:"]
+    if stats.terminated_contracts_count > 0:
+        lines.append(f"• розірвані договори: {format_int(stats.terminated_contracts_count)}")
+    if stats.disqualifications_count > 0:
+        lines.append(f"• дискваліфікації: {format_int(stats.disqualifications_count)}")
+    if complaints_or_monitoring_count > 0:
+        lines.append(f"• скарги/моніторинги: {format_int(complaints_or_monitoring_count)}")
+    return lines
+
+
+def build_prozorro_detected_signal_lines(prozorro_analysis: ProzorroAnalysis) -> list[str]:
+    stats = prozorro_analysis.stats
+    buyer_only = is_prozorro_buyer_only_summary(prozorro_analysis.search_summary)
+    signal_lines: list[str] = []
+    if stats.disqualifications_count > 0:
+        signal_lines.append("• Була дискваліфікація учасника.")
+    if stats.terminated_contracts_count > 0:
+        signal_lines.append("• Є розірвання договору.")
+    if stats.complaints_count > 0 or stats.supplier_related_complaints_count > 0:
+        if buyer_only:
+            signal_lines.append("• Є скарги/вимоги щодо закупівель компанії як замовника.")
+        else:
+            signal_lines.append("• Є скарги/вимоги у закупівлях.")
+    if count_prozorro_search_marker_items(prozorro_analysis.search_summary, "monitoring", confirmed_only=True) > 0:
+        if buyer_only:
+            signal_lines.append("• Є моніторинг закупівлі компанії як замовника.")
+        else:
+            signal_lines.append("• Є моніторинг закупівлі.")
+    if any(item.amendments_count > 0 for item in prozorro_analysis.procurements):
+        signal_lines.append("• Є зміни договору.")
+    if not signal_lines:
+        return []
+    header = "Сигнали як замовника:" if buyer_only else "⚠️ Виявлені сигнали:"
+    return [header, *signal_lines]
+
+
+def nonzero_stat_lines(items: list[tuple[str, int | float | None]]) -> list[str]:
+    lines: list[str] = []
+    for label, value in items:
+        if value is None or value == 0:
+            continue
+        lines.append(f"{label}: {format_int(value) if isinstance(value, int) else value}")
+    return lines
+
+
+def count_prozorro_search_marker_items(
+    search_summary: ProzorroSearchSummary | None,
+    marker_code: str,
+    *,
+    confirmed_only: bool = False,
+) -> int:
+    if not search_summary:
+        return 0
+    count = 0
+    for item in search_summary.items:
+        if confirmed_only and not item.get("participation_confirmed"):
+            continue
+        marker_codes = item.get("risk_marker_codes")
+        if isinstance(marker_codes, list) and marker_code in marker_codes:
+            count += 1
+    return count
+
+
 def optional_percent_field(label: str, value: float | None) -> list[str]:
-    if value is None:
+    if value is None or value == 0:
         return []
     return [f"{label}: {value:.1f}%"]
 
@@ -456,7 +855,9 @@ def user_risk_label_from_score(score: int) -> str:
         return "помірний"
     if score <= 70:
         return "підвищений"
-    return "високий"
+    if score <= 80:
+        return "високий"
+    return "критичний"
 
 
 def contacts_summary_has_source(contacts_summary: dict | None, source: str) -> bool:
@@ -464,10 +865,14 @@ def contacts_summary_has_source(contacts_summary: dict | None, source: str) -> b
         return False
     source_statuses = contacts_summary.get("source_statuses") or {}
     if source_statuses.get(source) == "found":
-        return True
+        return any(
+            source in ((contacts_summary.get(field) or {}).get("sources") or [])
+            and is_displayable_contact_value(field, (contacts_summary.get(field) or {}).get("value"))
+            for field in ("website", "phone", "email")
+        )
     for field in ("website", "phone", "email"):
         contact = contacts_summary.get(field) or {}
-        if source in (contact.get("sources") or []):
+        if source in (contact.get("sources") or []) and is_displayable_contact_value(field, contact.get("value")):
             return True
     return False
 
@@ -549,11 +954,8 @@ def build_financial_lines(lookup_result: CompanyLookupResult, clarity_data: Clar
         equity_trend_line = build_equity_capital_trend_line(lookup_result.financial_data.years)
         if equity_trend_line:
             lines.append(equity_trend_line)
-        lines.append("Доступність фінансових даних: знайдено.")
     elif lines:
         lines.append("Інші фінансові показники у доступних джерелах не знайдено.")
-    elif lookup_result.financial_data.financial_reports:
-        lines.append("Доступність фінансових даних: знайдено частково.")
     return lines
 
 
@@ -632,6 +1034,32 @@ def build_good_lines(
     return lines
 
 
+LOSS_ASSESSMENT_REASON_TYPES = {
+    "small_loss_found",
+    "medium_loss_found",
+    "large_loss_found",
+    "very_large_loss_found",
+    "critical_loss_found",
+}
+FINANCIAL_ASSESSMENT_REASON_TYPES = {
+    "negative_equity_found",
+    "severe_negative_equity",
+    "liabilities_exceed_assets",
+    "negative_equity_multiple_years",
+    "losses_with_negative_equity",
+    "weak_financial_position",
+} | LOSS_ASSESSMENT_REASON_TYPES
+POSITIVE_FINANCIAL_ASSESSMENT_REASON_TYPES = {
+    "positive_profit_found",
+    "positive_equity_found",
+    "equity_growth_found",
+    "assets_exceed_liabilities",
+    "strong_revenue_found",
+    "strong_financial_profile",
+    "very_strong_financial_profile",
+}
+
+
 def build_assessment_reason_lines(
     lookup_result: CompanyLookupResult,
     final_risk: dict,
@@ -647,11 +1075,12 @@ def build_assessment_reason_lines(
     company = lookup_result.company_data or CompanyData()
     lines: list[str] = []
     status_is_registered = bool(status and "зареєстр" in status.lower())
+    status_is_terminal = bool(status and is_terminal_status(status))
     if status_is_registered and company_age_years is not None and company_age_years >= 3:
         lines.append("✅ Компанія зареєстрована та працює тривалий час.")
     elif status_is_registered:
         lines.append("✅ Компанія має зареєстрований статус у доступних даних.")
-    elif company_age_years is not None and company_age_years >= 3:
+    elif company_age_years is not None and company_age_years >= 3 and not status_is_terminal:
         lines.append("✅ Компанія працює тривалий час.")
 
     if core_registration_data_present(company, status):
@@ -679,7 +1108,10 @@ def build_assessment_reason_lines(
     court_line = build_court_mentions_assessment_line(lookup_result, youcontrol_data)
     if court_line:
         lines.append(court_line)
+    lines.extend(build_positive_financial_assessment_lines(reason_types))
 
+    group_financial_reasons = should_group_financial_assessment_reasons(reason_types)
+    financial_reason_added = False
     for reason in final_risk.get("reasons", []):
         reason_type = reason.get("type")
         if reason.get("weight", 0) <= 0 or reason_type == "court_cases_found":
@@ -688,8 +1120,62 @@ def build_assessment_reason_lines(
             continue
         if reason_type == "many_court_mentions_found" and court_line:
             continue
+        if reason_type == "prozorro_sale_bankruptcy_asset_sale" and "bankruptcy_found" in reason_types:
+            continue
+        if (
+            group_financial_reasons
+            and reason_type in FINANCIAL_ASSESSMENT_REASON_TYPES
+            and reason_type not in LOSS_ASSESSMENT_REASON_TYPES
+        ):
+            if not financial_reason_added:
+                lines.append(f"⚠️ {format_financial_assessment_reason(reason_types)}")
+                financial_reason_added = True
+            continue
         lines.append(f"⚠️ {user_risk_reason_text(reason, lookup_result)}")
     return dedupe_lines(lines)
+
+
+def should_group_financial_assessment_reasons(reason_types: set[str]) -> bool:
+    financial_reason_types = reason_types.intersection(FINANCIAL_ASSESSMENT_REASON_TYPES)
+    return "weak_financial_position" in financial_reason_types or len(financial_reason_types) >= 2
+
+
+def format_financial_assessment_reason(reason_types: set[str]) -> str:
+    details: list[str] = []
+    if reason_types.intersection({"negative_equity_found", "severe_negative_equity"}):
+        details.append("від’ємний власний капітал")
+    if "liabilities_exceed_assets" in reason_types:
+        details.append("зобов’язання перевищують активи")
+    if "severe_negative_equity" in reason_types:
+        details.append("суттєвий дефіцит капіталу")
+    if "negative_equity_multiple_years" in reason_types:
+        details.append("від’ємний капітал у кількох періодах")
+    if "losses_with_negative_equity" in reason_types:
+        details.append("збиток на фоні від’ємного капіталу")
+    if not details:
+        return "Фінансова звітність показує слабкий фінансовий стан."
+    return f"Фінансова звітність показує комплексні проблеми: {', '.join(details)}."
+
+
+def build_positive_financial_assessment_lines(reason_types: set[str]) -> list[str]:
+    if not reason_types.intersection(POSITIVE_FINANCIAL_ASSESSMENT_REASON_TYPES):
+        return []
+    if reason_types.intersection(
+        FINANCIAL_ASSESSMENT_REASON_TYPES
+        | {"bankruptcy_found", "company_in_termination", "company_inactive", "sanctions_found"}
+    ):
+        return []
+
+    lines: list[str] = []
+    if reason_types.intersection({"strong_financial_profile", "very_strong_financial_profile"}):
+        lines.append(
+            "✅ Фінансовий профіль виглядає стабільним: прибуток, активи перевищують зобов’язання, власний капітал позитивний."
+        )
+    if "equity_growth_found" in reason_types:
+        lines.append("✅ Власний капітал зростає.")
+    if reason_types.intersection({"strong_revenue_found", "very_strong_financial_profile"}):
+        lines.append("✅ Компанія має значний дохід/активи.")
+    return lines
 
 
 def build_court_mentions_assessment_line(
@@ -701,27 +1187,18 @@ def build_court_mentions_assessment_line(
     has_opendatabot_mentions = lookup_result.risk_input.has_court_mentions or lookup_result.court_data.has_court_mentions
     if has_opendatabot_mentions and youcontrol_count is not None and youcontrol_count != opendatabot_count:
         return (
-            "⚠️ Судові згадки: "
+            "⚠️ Судові документи: "
             f"Opendatabot — {format_court_count_for_user(opendatabot_count)}, "
             f"YouControl — {format_court_count_for_user(youcontrol_count)}. "
-            "Потрібно оцінювати зміст справ, а не сам факт наявності судових документів."
+            "Потрібна ручна перевірка змісту справ."
         )
     if has_opendatabot_mentions:
-        if opendatabot_count > 100:
-            return "⚠️ Судові згадки: багато. Потрібна ручна перевірка змісту справ."
-        if opendatabot_count >= 20:
-            return (
-                "⚠️ Є значна кількість судових згадок у відкритих джерелах. "
-                "Потрібно оцінювати зміст справ, а не сам факт наявності судових документів."
-            )
-        return (
-            f"⚠️ Є судові згадки: {opendatabot_count}. "
-            "Потрібно оцінювати зміст справ, а не сам факт наявності судових документів."
-        )
+        count_text = format_court_count_for_user(opendatabot_count) if opendatabot_count else "знайдено"
+        return f"⚠️ Судові документи: {count_text}. Потрібна ручна перевірка змісту справ."
     if youcontrol_count:
         return (
-            f"⚠️ Судові згадки за YouControl: {format_court_count_for_user(youcontrol_count)}. "
-            "Потрібно оцінювати зміст справ, а не сам факт наявності судових документів."
+            f"⚠️ Судові документи за YouControl: {format_court_count_for_user(youcontrol_count)}. "
+            "Потрібна ручна перевірка змісту справ."
         )
     return None
 
@@ -742,7 +1219,7 @@ def parse_first_int_from_text(text: str) -> int | None:
 
 
 def format_court_count_for_user(count: int) -> str:
-    return "багато" if count > 100 else str(count)
+    return format_int(count)
 
 
 def core_registration_data_present(company: CompanyData, status: str | None) -> bool:
@@ -762,7 +1239,7 @@ def contacts_are_confirmed(contacts_summary: dict | None) -> bool:
         return False
     for field in ("website", "phone", "email"):
         contact = contacts_summary.get(field) or {}
-        if contact.get("value") and contact.get("confidence") == "high":
+        if is_displayable_contact_value(field, contact.get("value")) and contact.get("confidence") == "high":
             return True
     return False
 
@@ -835,13 +1312,13 @@ def build_top_risk_reason_lines(
 def user_risk_reason_text(reason: dict, lookup_result: CompanyLookupResult | None = None) -> str:
     reason_type = reason.get("type")
     if reason.get("status") == "conflict" and reason_type == "bankruptcy_found":
-        return "Є суперечливі дані щодо банкрутства. Потрібна ручна звірка першоджерел."
+        return "Є суперечливі дані щодо банкрутства. Потрібна ручна перевірка першоджерел."
     if reason_type == "court_cases_found":
         if lookup_result is not None:
             return format_court_mentions_line(get_court_mentions_count(lookup_result)).removeprefix("ℹ️ ")
-        return "Судові згадки потребують ручної перевірки змісту."
+        return "Судові документи потребують ручної перевірки змісту."
     if reason_type == "website_unavailable":
-        return "Сайт постачальника не вдалося відкрити автоматично. Це не означає шахрайство, але потребує ручної перевірки."
+        return "Сайт не вдалося перевірити автоматично. Це не є доказом ризику, але потребує ручної перевірки."
     if reason_type == "company_status_mismatch":
         return "Джерела по-різному показують статус компанії. Потрібна ручна перевірка."
     if reason_type == "tax_debt_found":
@@ -859,7 +1336,7 @@ def user_risk_reason_text(reason: dict, lookup_result: CompanyLookupResult | Non
     if reason_type == "many_enforcement_proceedings_found":
         return "Виявлено значну кількість виконавчих проваджень."
     if reason_type == "many_court_mentions_found":
-        return "Є значна кількість судових згадок у відкритих джерелах."
+        return "Є значна кількість судових документів у відкритих джерелах."
     if reason_type == "low_statutory_capital_with_debt":
         capital = (lookup_result.company_data.statutory_capital_uah if lookup_result and lookup_result.company_data else None)
         if capital is not None:
@@ -894,12 +1371,16 @@ def format_opendatabot_tax_debt_reason(raw_text: str) -> str:
     return f"Opendatabot показує, що ДПС стягує з компанії {count} {plural_tax_debt(count)}."
 
 
-def plural_tax_debt(count: int) -> str:
+def plural_uk(count: int, singular: str, paucal: str, plural: str) -> str:
     if count % 10 == 1 and count % 100 != 11:
-        return "податковий борг"
+        return singular
     if count % 10 in {2, 3, 4} and count % 100 not in {12, 13, 14}:
-        return "податкові борги"
-    return "податкових боргів"
+        return paucal
+    return plural
+
+
+def plural_tax_debt(count: int) -> str:
+    return plural_uk(count, "податковий борг", "податкові борги", "податкових боргів")
 
 
 def get_court_mentions_count(lookup_result: CompanyLookupResult) -> int:
@@ -912,34 +1393,73 @@ def get_court_mentions_count(lookup_result: CompanyLookupResult) -> int:
 
 
 def format_court_mentions_line(court_mentions_count: int) -> str:
-    if court_mentions_count > 100:
-        return "ℹ️ Судові згадки: багато. Потрібна ручна перевірка змісту справ."
-    return f"ℹ️ Судові згадки: {court_mentions_count}."
+    count_text = format_court_count_for_user(court_mentions_count) if court_mentions_count else "знайдено"
+    return f"ℹ️ Судові документи: {count_text}. Потрібна ручна перевірка змісту справ."
 
 
-def build_court_decision_lines(lookup_result: CompanyLookupResult, *, limit: int = 2) -> list[str]:
-    decisions = lookup_result.court_data.decisions if lookup_result.court_data else []
-    lines: list[str] = []
-    for decision in decisions[:limit]:
-        line = format_court_decision_line(decision)
-        if line:
-            lines.append(line)
+def build_court_document_block_lines(lookup_result: CompanyLookupResult) -> list[str]:
+    if not has_court_source(lookup_result):
+        return []
+    details_limit = 3
+    lines = [format_court_document_count_line(lookup_result)]
+    shown_count_line = format_court_shown_details_count_line(lookup_result, limit=details_limit)
+    if shown_count_line:
+        lines.append(shown_count_line)
+    lines.extend(build_court_decision_lines(lookup_result, limit=details_limit))
     return lines
 
 
-def format_court_decision_line(decision: dict) -> str:
+def format_court_shown_details_count_line(lookup_result: CompanyLookupResult, *, limit: int) -> str | None:
+    decisions = lookup_result.court_data.decisions if lookup_result.court_data else []
+    shown_count = min(len(decisions), limit)
+    total_count = get_court_mentions_count(lookup_result)
+    if shown_count <= 0 or total_count <= shown_count:
+        return None
+    return f"Показано деталізованих документів: {format_int(shown_count)} з {format_int(total_count)}."
+
+
+def format_court_document_count_line(lookup_result: CompanyLookupResult) -> str:
+    count = get_court_mentions_count(lookup_result)
+    if count:
+        return f"Знайдено судових документів: {format_int(count)}."
+    return "Судові документи: знайдено. Кількість у доступних даних не визначена."
+
+
+def has_court_source(lookup_result: CompanyLookupResult) -> bool:
+    court_data = lookup_result.court_data
+    if not court_data:
+        return False
+    return bool(
+        court_data.has_court_mentions
+        or get_court_mentions_count(lookup_result) > 0
+        or court_data.decisions
+        or court_data.source_urls
+        or court_data.risk_flags
+    )
+
+
+def build_court_decision_lines(lookup_result: CompanyLookupResult, *, limit: int = 5) -> list[str]:
+    decisions = lookup_result.court_data.decisions if lookup_result.court_data else []
+    lines: list[str] = []
+    for index, decision in enumerate(decisions[:limit], start=1):
+        lines.extend(format_court_decision_lines(index, decision))
+    return lines
+
+
+def format_court_decision_lines(index: int, decision: dict) -> list[str]:
     document_type = str(decision.get("document_type") or "Судовий документ").strip()
     decision_date = str(decision.get("decision_date") or "").strip()
     case_number = str(decision.get("case_number") or "").strip()
-    summary = str(decision.get("risk_summary") or decision.get("claim_subject") or "").strip()
+    url = first_nonempty_text(decision, "url", "source_url", "document_url", "link")
     title = document_type
     if decision_date:
         title = f"{title} від {decision_date}"
     if case_number:
         title = f"{title}, справа №{case_number}"
-    if summary:
-        return f"• {title}: {short_text(summary, 220)}"
-    return f"• {title}"
+    lines = [f"{index}. {title}"]
+    if url:
+        lines.append(f"   Посилання: {url}")
+    return lines
 
 
 def short_text(value: str, limit: int) -> str:
@@ -1068,7 +1588,7 @@ def build_website_check_lines(domain_reputation_data: dict | None) -> list[str]:
 
     if domain_reputation_data.get("error") == "website_unavailable" or not domain_reputation_data.get("found"):
         return [
-            "⚠️ Сайт постачальника не вдалося відкрити автоматично. Це не означає шахрайство, але потребує ручної перевірки."
+            "⚠️ Сайт не вдалося перевірити автоматично. Це не є доказом ризику, але потребує ручної перевірки."
         ]
 
     flags = set(domain_reputation_data.get("risk_flags") or [])
@@ -1104,18 +1624,14 @@ def build_contact_lines(domain_reputation_data: dict | None) -> list[str]:
         return []
     contacts = domain_reputation_data.get("contacts") or {}
     lines: list[str] = []
-    if domain_reputation_data.get("url"):
-        lines.append(f"• Сайт: {domain_reputation_data['url']}")
-    emails = contacts.get("emails") or []
-    if emails:
-        lines.append(f"• Email: {', '.join(emails[:3])}")
-    phones = contacts.get("phones") or []
+    if is_displayable_contact_value("website", domain_reputation_data.get("url")):
+        lines.append(f"🌐 Сайт: {domain_reputation_data['url']}")
+    phones = [phone for phone in (contacts.get("phones") or []) if is_displayable_contact_value("phone", phone)]
     if phones:
-        lines.append(f"• Телефон: {', '.join(phones[:3])}")
-    trust_level = domain_reputation_data.get("trust_level")
-    if trust_level:
-        labels = {"high": "висока", "medium": "середня", "low": "низька", "unknown": "невідома"}
-        lines.append(f"• Довіра до збігу сайту з компанією: {labels.get(trust_level, trust_level)}")
+        lines.append(f"☎️ Телефон: {', '.join(phones[:3])}")
+    emails = [email for email in (contacts.get("emails") or []) if is_displayable_contact_value("email", email)]
+    if emails:
+        lines.append(f"✉️ Email: {', '.join(emails[:3])}")
     return lines
 
 
@@ -1123,11 +1639,6 @@ def build_contacts_summary_lines(contacts_summary: dict | None) -> list[str]:
     if not contacts_summary:
         return []
     lines: list[str] = []
-    source_statuses = contacts_summary.get("source_statuses") or {}
-    checked_statuses = [str(status) for status in source_statuses.values()]
-    unavailable_statuses = {"unavailable", "blocked", "parse_error"}
-    any_unavailable = any(status in unavailable_statuses for status in checked_statuses)
-    all_unavailable = bool(checked_statuses) and all(status in unavailable_statuses for status in checked_statuses)
     for field, icon, label in (
         ("website", "🌐", "Сайт"),
         ("phone", "☎️", "Телефон"),
@@ -1135,14 +1646,29 @@ def build_contacts_summary_lines(contacts_summary: dict | None) -> list[str]:
     ):
         contact = contacts_summary.get(field) or {}
         value = contact.get("value")
-        if value:
+        if is_displayable_contact_value(field, value):
             lines.append(f"{icon} {label}: {format_contact_value(field, str(value))}")
-        else:
-            if any_unavailable or all_unavailable:
-                lines.append(f"{icon} {label}: не вдалося автоматично перевірити.")
-            else:
-                lines.append(f"{icon} {label}: не знайдено в доступних джерелах.")
     return lines
+
+
+def is_displayable_contact_value(field: str, value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text:
+        return False
+    lowered = text.casefold()
+    if "*" in text:
+        return False
+    if "не вдалося автоматично перевірити" in lowered or "не знайдено" in lowered:
+        return False
+    if "невідом" in lowered or "unknown" in lowered:
+        return False
+    if field == "phone" and len("".join(char for char in text if char.isdigit())) < 5:
+        return False
+    if field == "email" and "@" not in text:
+        return False
+    return True
 
 
 def format_contact_value(field: str, value: str) -> str:
@@ -1404,6 +1930,7 @@ async def run_source_lookups(
     website_url: str | None = None,
     analysis_timeout: float = ANALYSIS_TIMEOUT_SECONDS,
     prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
+    prozorro_sale_lookup: Callable[[str], ProzorroSaleAnalysis] = lookup_prozorro_sale_by_edrpou,
 ) -> tuple[CompanyLookupResult, ClarityData | None, dict | None, dict | None, dict | None, dict | None, dict | None]:
     analysis_deadline = asyncio.get_running_loop().time() + max(0.0, analysis_timeout)
     lookup_task = asyncio.create_task(asyncio.to_thread(lookup, edrpou))
@@ -1412,7 +1939,16 @@ async def run_source_lookups(
     debtors_task = asyncio.create_task(asyncio.to_thread(debtors_lookup, edrpou))
     tax_task = asyncio.create_task(asyncio.to_thread(tax_lookup, edrpou))
     prozorro_task = asyncio.create_task(asyncio.to_thread(prozorro_lookup, edrpou))
-    first_batch_tasks = {lookup_task, clarity_task, youcontrol_task, debtors_task, tax_task, prozorro_task}
+    prozorro_sale_task = asyncio.create_task(asyncio.to_thread(prozorro_sale_lookup, edrpou))
+    first_batch_tasks = {
+        lookup_task,
+        clarity_task,
+        youcontrol_task,
+        debtors_task,
+        tax_task,
+        prozorro_task,
+        prozorro_sale_task,
+    }
     await asyncio.wait(first_batch_tasks, timeout=max(0.0, analysis_timeout))
 
     result = completed_lookup_result(lookup_task, edrpou)
@@ -1421,7 +1957,13 @@ async def run_source_lookups(
     debtors_registry_data = completed_debtors_result(debtors_task, edrpou)
     tax_data = completed_tax_result(tax_task, edrpou)
     prozorro_analysis = completed_prozorro_result(prozorro_task, edrpou)
-    result = result.model_copy(update={"prozorro_analysis": prozorro_analysis})
+    prozorro_sale_analysis = completed_prozorro_sale_result(prozorro_sale_task, edrpou)
+    result = result.model_copy(
+        update={
+            "prozorro_analysis": prozorro_analysis,
+            "prozorro_sale_analysis": prozorro_sale_analysis,
+        }
+    )
 
     for task in first_batch_tasks:
         if not task.done():
@@ -1521,6 +2063,19 @@ def completed_prozorro_result(
     except Exception:
         logging.exception("Prozorro lookup failed for EDRPOU %s", edrpou)
         return ProzorroAnalysis(status="source_error", error="lookup_failed")
+
+
+def completed_prozorro_sale_result(
+    task: asyncio.Task[ProzorroSaleAnalysis],
+    edrpou: str,
+) -> ProzorroSaleAnalysis:
+    if task.cancelled() or not task.done():
+        return ProzorroSaleAnalysis(status="source_error", error="analysis_timeout")
+    try:
+        return task.result()
+    except Exception:
+        logging.exception("Prozorro.Sale lookup failed for EDRPOU %s", edrpou)
+        return ProzorroSaleAnalysis(status="source_error", error="lookup_failed")
 
 
 def completed_domain_reputation_result(
@@ -1929,6 +2484,16 @@ def collect_source_risk_flags(
             prepared_flag.setdefault("status", "found")
             prepared_flag.setdefault("confidence", "medium")
             flags.append(prepared_flag)
+        flags.extend(collect_prozorro_search_noise_flags(result))
+    prozorro_sale_analysis = result.prozorro_sale_analysis
+    if prozorro_sale_analysis and prozorro_sale_analysis.status == "found":
+        for flag in prozorro_sale_analysis.risk_flags:
+            prepared_flag = dict(flag)
+            prepared_flag.setdefault("source", "prozorro_sale")
+            prepared_flag.setdefault("status", "found")
+            prepared_flag.setdefault("confidence", "medium")
+            flags.append(prepared_flag)
+    flags.extend(collect_financial_risk_flags(result))
     flags.extend(collect_company_status_risk_flags(result, clarity_data, youcontrol_data))
     flags.extend(collect_company_status_mismatch_flags(result, clarity_data, youcontrol_data))
     flags.extend(collect_low_capital_debt_flags(result, flags))
@@ -1946,8 +2511,37 @@ def has_found_flag(flags: list[dict], flag_type: str, source: str | None = None)
     return False
 
 
+def collect_prozorro_search_noise_flags(result: CompanyLookupResult) -> list[dict]:
+    prozorro_analysis = result.prozorro_analysis
+    if not prozorro_analysis or prozorro_analysis.status not in {"found", "partial"}:
+        return []
+    search_summary = prozorro_analysis.search_summary
+    if not search_summary:
+        return []
+    if (search_summary.total_count or 0) <= PROZORRO_UNCONFIRMED_SEARCH_NOISE_THRESHOLD:
+        return []
+    if search_summary.checked_count <= 0:
+        return []
+    if (search_summary.confirmed_participation_count or 0) > 0:
+        return []
+    return [
+        {
+            "type": "prozorro_unconfirmed_search_noise",
+            "source": "prozorro_search",
+            "status": "found",
+            "confidence": "low",
+            "raw_text": (
+                "Багато результатів пошуку Prozorro без підтвердженої участі компанії: "
+                f"{format_int(search_summary.total_count or 0)}."
+            ),
+            "matched_pattern": "unconfirmed_search_noise",
+            "match_type": "search_summary",
+        }
+    ]
+
+
 def collect_low_capital_debt_flags(result: CompanyLookupResult, flags: list[dict]) -> list[dict]:
-    capital = result.risk_input.statutory_capital_uah
+    capital = company_statutory_capital_uah(result)
     if capital is None or capital > 1000:
         return []
     if not any(is_debt_related_flag(flag) for flag in flags):
@@ -1961,6 +2555,339 @@ def collect_low_capital_debt_flags(result: CompanyLookupResult, flags: list[dict
             "raw_text": f"Статутний капітал: {format_uah(capital)}",
         }
     ]
+
+
+def collect_financial_risk_flags(result: CompanyLookupResult) -> list[dict]:
+    years = result.financial_data.years if result.financial_data else {}
+    flags: list[dict] = []
+    statutory_capital = company_statutory_capital_uah(result)
+    low_authorized_capital_found = (
+        statutory_capital is not None
+        and statutory_capital <= LOW_AUTHORIZED_CAPITAL_THRESHOLD_UAH
+    )
+    financial_data_missing = (
+        has_financial_profile_context(result)
+        and not has_core_financial_values(years)
+    )
+
+    if low_authorized_capital_found:
+        flags.append(
+            public_financial_profile_flag(
+                "low_authorized_capital_found",
+                f"Статутний капітал: {format_uah(statutory_capital)}",
+            )
+        )
+    if financial_data_missing:
+        flags.append(
+            public_financial_profile_flag(
+                "financial_data_missing",
+                "Дохід, прибуток, активи та зобов’язання у доступних джерелах не знайдено",
+            )
+        )
+    if low_authorized_capital_found and financial_data_missing:
+        flags.append(
+            public_financial_profile_flag(
+                "weak_public_financial_profile",
+                "Низький статутний капітал і відсутні повні фінансові показники",
+            )
+        )
+
+    if not years:
+        return flags
+
+    latest_year = max(years.keys(), key=sort_financial_year)
+    latest_financial = years[latest_year]
+    latest_equity = financial_year_equity_uah(latest_financial)
+    latest_assets = latest_financial.assets_uah
+    latest_liabilities = latest_financial.liabilities_uah
+    latest_profit = latest_financial.net_profit_uah
+    latest_revenue = latest_financial.revenue_uah
+    equity_growth_found = financial_equity_growth_found(years)
+    negative_equity_years = [
+        year
+        for year, financial_year in years.items()
+        if (financial_year_equity_uah(financial_year) or 0) < 0
+    ]
+
+    if latest_equity is not None and latest_equity < 0:
+        flags.append(financial_risk_flag("negative_equity_found", latest_year, f"Власний капітал: {format_uah(latest_equity)}"))
+
+    if latest_liabilities is not None and latest_assets is not None and latest_liabilities > latest_assets:
+        gap = latest_liabilities - latest_assets
+        flags.append(
+            financial_risk_flag(
+                "liabilities_exceed_assets",
+                latest_year,
+                f"Зобов’язання перевищують активи на {format_uah(gap)}",
+            )
+        )
+
+    if has_severe_negative_equity(latest_equity, latest_assets, latest_liabilities):
+        flags.append(financial_risk_flag("severe_negative_equity", latest_year, "Суттєвий дефіцит власного капіталу"))
+
+    if len(negative_equity_years) >= 2:
+        flags.append(
+            financial_risk_flag(
+                "negative_equity_multiple_years",
+                latest_year,
+                f"Від’ємний власний капітал у роках: {', '.join(sorted(negative_equity_years, key=sort_financial_year))}",
+            )
+        )
+
+    if latest_profit is not None and latest_profit < 0 and latest_equity is not None and latest_equity < 0:
+        flags.append(
+            financial_risk_flag(
+                "losses_with_negative_equity",
+                latest_year,
+                f"Збиток: {format_uah(latest_profit)}; власний капітал: {format_uah(latest_equity)}",
+            )
+        )
+
+    loss_flag_type = financial_loss_flag_type(
+        latest_profit,
+        latest_assets,
+        latest_revenue,
+        latest_equity,
+        latest_liabilities,
+    )
+    if loss_flag_type:
+        flags.append(financial_risk_flag(loss_flag_type, latest_year, f"Збиток: {format_uah(latest_profit)}"))
+
+    if latest_profit is not None and latest_profit > 0:
+        flags.append(financial_risk_flag("positive_profit_found", latest_year, f"Прибуток: {format_uah(latest_profit)}"))
+
+    if latest_equity is not None and latest_equity > 0:
+        flags.append(
+            financial_risk_flag("positive_equity_found", latest_year, f"Власний капітал: {format_uah(latest_equity)}")
+        )
+
+    if equity_growth_found:
+        flags.append(financial_risk_flag("equity_growth_found", latest_year, "Власний капітал зростає"))
+
+    if latest_assets is not None and latest_liabilities is not None and latest_assets > latest_liabilities:
+        gap = latest_assets - latest_liabilities
+        flags.append(
+            financial_risk_flag(
+                "assets_exceed_liabilities",
+                latest_year,
+                f"Активи перевищують зобов’язання на {format_uah(gap)}",
+            )
+        )
+
+    if latest_revenue is not None and latest_revenue >= 10_000_000:
+        flags.append(financial_risk_flag("strong_revenue_found", latest_year, f"Дохід: {format_uah(latest_revenue)}"))
+
+    has_healthy_financial_profile = (
+        latest_profit is not None
+        and latest_profit > 0
+        and latest_equity is not None
+        and latest_equity > 0
+        and latest_assets is not None
+        and latest_liabilities is not None
+        and latest_assets > latest_liabilities
+        and latest_revenue is not None
+        and latest_revenue >= 10_000_000
+    )
+    if has_healthy_financial_profile:
+        flags.append(financial_risk_flag("strong_financial_profile", latest_year, "Прибуток, позитивний капітал і здоровий баланс"))
+
+    has_large_financial_scale = bool(
+        (latest_revenue is not None and latest_revenue >= 1_000_000_000)
+        or (latest_assets is not None and latest_assets >= 1_000_000_000)
+    )
+    if (
+        has_healthy_financial_profile
+        and has_large_financial_scale
+        and (equity_growth_found or (result.risk_input.company_age_years or 0) >= 5)
+    ):
+        flags.append(financial_risk_flag("very_strong_financial_profile", latest_year, "Великий масштаб на фоні здорових фінансів"))
+
+    strong_financial_flags = {
+        flag["type"]
+        for flag in flags
+        if flag["type"]
+        in {
+            "negative_equity_found",
+            "severe_negative_equity",
+            "liabilities_exceed_assets",
+            "negative_equity_multiple_years",
+            "losses_with_negative_equity",
+            "large_loss_found",
+            "very_large_loss_found",
+            "critical_loss_found",
+        }
+    }
+    if len(strong_financial_flags) >= 2:
+        flags.append(
+            financial_risk_flag(
+                "weak_financial_position",
+                latest_year,
+                f"Одночасно виявлено фінансові проблеми: {', '.join(sorted(strong_financial_flags))}",
+            )
+        )
+
+    return flags
+
+
+LOSS_FLAG_ORDER = [
+    "small_loss_found",
+    "medium_loss_found",
+    "large_loss_found",
+    "very_large_loss_found",
+    "critical_loss_found",
+]
+
+
+def financial_loss_flag_type(
+    profit_loss: int | None,
+    assets: int | None,
+    revenue: int | None,
+    equity: int | None = None,
+    liabilities: int | None = None,
+) -> str | None:
+    if profit_loss is None or profit_loss >= 0:
+        return None
+    loss_abs = abs(profit_loss)
+    if loss_abs < 10_000:
+        flag_type = "small_loss_found"
+    elif loss_abs < 100_000:
+        flag_type = "medium_loss_found"
+    elif loss_abs < 1_000_000:
+        flag_type = "large_loss_found"
+    else:
+        flag_type = "large_loss_found"
+
+    if is_critical_loss(loss_abs, assets, revenue, equity, liabilities):
+        flag_type = "critical_loss_found"
+    return flag_type
+
+
+def is_critical_loss(
+    loss_abs: int,
+    assets: int | None,
+    revenue: int | None,
+    equity: int | None,
+    liabilities: int | None,
+) -> bool:
+    if revenue is not None and revenue > 0 and loss_abs > revenue:
+        return True
+    if assets is not None and assets > 0 and loss_abs / assets >= 0.10:
+        return True
+    if loss_abs >= 10_000_000 and equity is not None and equity < 0:
+        return True
+    if (
+        loss_abs >= 10_000_000
+        and assets is not None
+        and liabilities is not None
+        and liabilities > assets
+    ):
+        return True
+    return False
+
+
+def loss_ratio_values(loss_abs: int, assets: int | None, revenue: int | None) -> list[float]:
+    ratios: list[float] = []
+    if assets is not None and assets > 0:
+        ratios.append(loss_abs / assets)
+    if revenue is not None and revenue > 0:
+        ratios.append(loss_abs / revenue)
+    return ratios
+
+
+def adjacent_loss_flag(flag_type: str, step: int) -> str:
+    index = LOSS_FLAG_ORDER.index(flag_type)
+    next_index = min(max(index + step, 0), len(LOSS_FLAG_ORDER) - 1)
+    return LOSS_FLAG_ORDER[next_index]
+
+
+def company_statutory_capital_uah(result: CompanyLookupResult) -> int | None:
+    if result.risk_input.statutory_capital_uah is not None:
+        return result.risk_input.statutory_capital_uah
+    if result.company_data and result.company_data.statutory_capital_uah is not None:
+        return result.company_data.statutory_capital_uah
+    return None
+
+
+def has_financial_profile_context(result: CompanyLookupResult) -> bool:
+    if result.risk_input.has_financial_history:
+        return True
+    return company_statutory_capital_uah(result) is not None
+
+
+def has_core_financial_values(years: dict[str, FinancialYearData]) -> bool:
+    for financial_year in years.values():
+        if any(
+            value is not None
+            for value in (
+                financial_year.revenue_uah,
+                financial_year.net_profit_uah,
+                financial_year.assets_uah,
+                financial_year.liabilities_uah,
+                financial_year.equity_uah,
+            )
+        ):
+            return True
+    return False
+
+
+def public_financial_profile_flag(flag_type: str, raw_text: str) -> dict:
+    return {
+        "type": flag_type,
+        "source": "financials",
+        "status": "found",
+        "confidence": "medium",
+        "raw_text": raw_text,
+        "matched_pattern": flag_type,
+        "match_type": "public_financial_profile",
+    }
+
+
+def has_severe_negative_equity(
+    equity: int | None,
+    assets: int | None,
+    liabilities: int | None,
+) -> bool:
+    severity_floor = 1_000_000
+    if equity is not None and equity < 0:
+        asset_based_threshold = int((assets or 0) * 0.25)
+        if abs(equity) >= max(severity_floor, asset_based_threshold):
+            return True
+
+    if assets is None or liabilities is None or liabilities <= assets:
+        return False
+    liabilities_gap = liabilities - assets
+    asset_based_threshold = int(assets * 0.25)
+    return liabilities_gap >= max(severity_floor, asset_based_threshold)
+
+
+def financial_equity_growth_found(years: dict[str, FinancialYearData]) -> bool:
+    equity_points = [
+        (year, financial_year_equity_uah(financial_year))
+        for year, financial_year in years.items()
+    ]
+    equity_points = [
+        (year, equity)
+        for year, equity in equity_points
+        if equity is not None
+    ]
+    if len(equity_points) < 2:
+        return False
+    ordered_points = sorted(equity_points, key=lambda item: sort_financial_year(item[0]))
+    first_equity = ordered_points[0][1]
+    latest_equity = ordered_points[-1][1]
+    return latest_equity > first_equity
+
+
+def financial_risk_flag(flag_type: str, year: str, raw_text: str) -> dict:
+    return {
+        "type": flag_type,
+        "source": "financials",
+        "status": "found",
+        "confidence": "medium",
+        "raw_text": f"{year}: {raw_text}",
+        "matched_pattern": flag_type,
+        "match_type": "financial_statement",
+    }
 
 
 def is_debt_related_flag(flag: dict) -> bool:
@@ -1986,13 +2913,15 @@ def collect_company_status_risk_flags(
     youcontrol_data: dict | None,
 ) -> list[dict]:
     flags: list[dict] = []
-    for source, status in collect_company_statuses(result, clarity_data, youcontrol_data):
+    statuses = collect_company_statuses(result, clarity_data, youcontrol_data)
+    has_status_conflict = has_company_status_conflict(statuses)
+    for source, status in statuses:
         lowered = normalize_compare_value(status) or ""
         if is_safe_negative_status(lowered):
             continue
         if "банкрут" in lowered or "bankrupt" in lowered:
             flags.append(status_risk_flag("bankruptcy_found", source, status, "банкрут"))
-        elif "припинен" in lowered or "припинення" in lowered or "terminated" in lowered:
+        elif is_company_termination_status(status) and not has_status_conflict:
             flags.append(status_risk_flag("company_in_termination", source, status, "припин"))
         elif any(marker in lowered for marker in ("ліквід", "неактив", "анульован", "liquid")):
             flags.append(status_risk_flag("company_inactive", source, status, "ліквід/неактив/анульован"))
@@ -2084,14 +3013,18 @@ def collect_company_status_mismatch_flags(
     youcontrol_data: dict | None,
 ) -> list[dict]:
     statuses = collect_company_statuses(result, clarity_data, youcontrol_data)
-    active_sources = [source for source, status in statuses if is_registered_status(status)]
-    terminal_sources = [source for source, status in statuses if is_terminal_status(status)]
-    if not active_sources or not terminal_sources:
+    if not has_company_status_conflict(statuses):
         return []
     return [
         {"type": "company_status_mismatch", "source": source}
-        for source in dict.fromkeys(active_sources + terminal_sources)
+        for source in dict.fromkeys(source for source, _ in statuses)
     ]
+
+
+def has_company_status_conflict(statuses: list[tuple[str, str]]) -> bool:
+    active_sources = [source for source, status in statuses if is_registered_status(status)]
+    terminal_sources = [source for source, status in statuses if is_terminal_status(status)]
+    return bool(active_sources and terminal_sources)
 
 
 def collect_company_statuses(
@@ -2119,11 +3052,11 @@ def is_terminal_status(status: str) -> bool:
     lowered = normalize_compare_value(status) or ""
     if is_safe_negative_status(lowered):
         return False
+    if is_company_termination_status(lowered):
+        return True
     return any(
         marker in lowered
         for marker in (
-            "припинен",
-            "припинення",
             "ліквід",
             "банкрут",
             "неактив",
@@ -2133,6 +3066,23 @@ def is_terminal_status(status: str) -> bool:
             "bankrupt",
         )
     )
+
+
+def is_company_termination_status(status: str) -> bool:
+    lowered = normalize_compare_value(status) or ""
+    if is_safe_negative_status(lowered):
+        return False
+    normalized = lowered.strip(" .:;")
+    for prefix in ("статус:", "стан:", "актуальний статус:", "статус "):
+        if normalized.startswith(prefix):
+            normalized = normalized.removeprefix(prefix).strip(" .:;")
+    return normalized in {
+        "в стані припинення",
+        "у стані припинення",
+        "припиняється",
+        "припинено",
+        "terminated",
+    }
 
 
 def is_safe_negative_status(status: str) -> bool:
@@ -2168,8 +3118,6 @@ def collect_opendatabot_risk_flags(result: CompanyLookupResult) -> list[dict]:
     company = result.company_data
     status = (company.status if company else "") or ""
     lowered_status = status.lower()
-    if not is_safe_negative_status(lowered_status) and ("припинен" in lowered_status or "припинення" in lowered_status):
-        flags.append(status_risk_flag("company_in_termination", "opendatabot", status, "припин"))
     if not is_safe_negative_status(lowered_status) and ("ліквід" in lowered_status or "анульован" in lowered_status):
         flags.append(status_risk_flag("company_inactive", "opendatabot", status, "ліквід/анульован"))
 
@@ -2177,14 +3125,35 @@ def collect_opendatabot_risk_flags(result: CompanyLookupResult) -> list[dict]:
         flags.append({"type": "young_company", "source": "opendatabot"})
     if result.risk_input.has_court_mentions or result.court_data.has_court_mentions:
         flags.append({"type": "court_cases_found", "source": "opendatabot"})
-    if get_court_mentions_count(result) >= 20:
+    court_mentions_count = get_court_mentions_count(result)
+    if 5 <= court_mentions_count < 20:
+        flags.append(
+            {
+                "type": "several_court_mentions_found",
+                "source": "opendatabot",
+                "status": "found",
+                "confidence": "low",
+                "raw_text": f"Судові згадки: {court_mentions_count}",
+            }
+        )
+    if court_mentions_count >= 20:
         flags.append(
             {
                 "type": "many_court_mentions_found",
                 "source": "opendatabot",
                 "status": "found",
                 "confidence": "low",
-                "raw_text": f"Судові згадки: {get_court_mentions_count(result)}",
+                "raw_text": f"Судові згадки: {court_mentions_count}",
+            }
+        )
+    if court_mentions_count > 10_000:
+        flags.append(
+            {
+                "type": "very_many_court_mentions_found",
+                "source": "opendatabot",
+                "status": "found",
+                "confidence": "low",
+                "raw_text": f"Судові згадки: {court_mentions_count}",
             }
         )
     if result.risk_input.tax_debt_found:
@@ -2361,6 +3330,9 @@ def build_sources_snapshot(
     sources["tax"] = tax_data
     sources["domain_reputation"] = domain_reputation_data
     sources["prozorro"] = result.prozorro_analysis.model_dump(mode="json") if result.prozorro_analysis else None
+    sources["prozorro_sale"] = (
+        result.prozorro_sale_analysis.model_dump(mode="json") if result.prozorro_sale_analysis else None
+    )
     sources["contacts_summary"] = contacts_summary
     sources["contact_sources"] = (contacts_summary or {}).get("source_results") if contacts_summary else None
     sources["court_analysis"] = {
@@ -2389,6 +3361,15 @@ def is_successful_tax(tax_data: dict | None) -> bool:
 
 def is_checked_domain_reputation(domain_reputation_data: dict | None) -> bool:
     return bool(domain_reputation_data and domain_reputation_data.get("checked"))
+
+
+def is_useful_domain_reputation_source(domain_reputation_data: dict | None) -> bool:
+    return bool(
+        domain_reputation_data
+        and domain_reputation_data.get("checked")
+        and domain_reputation_data.get("found")
+        and is_displayable_contact_value("website", domain_reputation_data.get("url") or domain_reputation_data.get("domain"))
+    )
 
 
 def should_store_youcontrol_diagnostic(youcontrol_data: dict) -> bool:
@@ -2587,6 +3568,7 @@ async def debug_handler(
     contacts_lookup: Callable[[str, dict | None], dict | None] = fetch_company_contacts_async,
     analysis_timeout: float = ANALYSIS_TIMEOUT_SECONDS,
     prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
+    prozorro_sale_lookup: Callable[[str], ProzorroSaleAnalysis] = lookup_prozorro_sale_by_edrpou,
 ) -> None:
     edrpou = extract_debug_edrpou(message.text or "")
     if not edrpou:
@@ -2605,6 +3587,7 @@ async def debug_handler(
         website_url=None,
         analysis_timeout=analysis_timeout,
         prozorro_lookup=prozorro_lookup,
+        prozorro_sale_lookup=prozorro_sale_lookup,
     )
     enriched = with_source_diagnostics(
         result,
@@ -2694,6 +3677,9 @@ def checked_sources(sources: dict) -> list[str]:
     prozorro = sources.get("prozorro") or {}
     if prozorro and prozorro.get("status") in {"found", "partial"}:
         checked.append("prozorro")
+    prozorro_sale = sources.get("prozorro_sale") or {}
+    if prozorro_sale and prozorro_sale.get("status") == "found":
+        checked.append("prozorro_sale")
     if sources.get("contacts_summary"):
         checked.append("contacts_summary")
     if sources.get("court_analysis"):
@@ -2724,6 +3710,9 @@ def unavailable_sources(sources: dict) -> list[str]:
     prozorro = sources.get("prozorro") or {}
     if prozorro and prozorro.get("status") == "source_error":
         unavailable.append("prozorro")
+    prozorro_sale = sources.get("prozorro_sale") or {}
+    if prozorro_sale and prozorro_sale.get("status") == "source_error":
+        unavailable.append("prozorro_sale")
     return unavailable
 
 
@@ -2739,6 +3728,7 @@ async def edrpou_handler(
     save: Callable[[CompanyLookupResult, int | None], object] = save_check_result,
     analysis_timeout: float = ANALYSIS_TIMEOUT_SECONDS,
     prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
+    prozorro_sale_lookup: Callable[[str], ProzorroSaleAnalysis] = lookup_prozorro_sale_by_edrpou,
 ) -> None:
     text = message.text or ""
     edrpou, website_url = parse_edrpou_query(text)
@@ -2759,6 +3749,7 @@ async def edrpou_handler(
         website_url=website_url,
         analysis_timeout=analysis_timeout,
         prozorro_lookup=prozorro_lookup,
+        prozorro_sale_lookup=prozorro_sale_lookup,
     )
     user_id = getattr(getattr(message, "from_user", None), "id", None)
     try:

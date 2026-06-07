@@ -21,7 +21,11 @@ class ProzorroLookupTests(unittest.TestCase):
         from app.services.prozorro_lookup import lookup_prepared_prozorro
 
         with (
-            patch.dict("os.environ", {"PROZORRO_CACHE_PATH": ""}, clear=True),
+            patch.dict(
+                "os.environ",
+                {"PROZORRO_CACHE_PATH": "", "PROZORRO_PORTAL_SEARCH_ENABLED": "0"},
+                clear=True,
+            ),
             patch("app.services.prozorro_lookup.fetch_recent_prozorro_procurements_sync") as live_fetch,
         ):
             live_fetch.return_value = [
@@ -39,6 +43,57 @@ class ProzorroLookupTests(unittest.TestCase):
         self.assertEqual(result.status, "found")
         self.assertEqual(result.stats.procurements_count, 1)
         self.assertEqual(result.stats.wins_count, 1)
+
+    def test_lookup_returns_partial_portal_summary_without_risk_flags(self):
+        from app.models.company_lookup import ProzorroSearchSummary
+        from app.services.prozorro_lookup import lookup_prepared_prozorro
+
+        result = lookup_prepared_prozorro(
+            "12345678",
+            source=lambda edrpou: None,
+            portal_search_source=lambda edrpou: ProzorroSearchSummary(
+                total_count=370,
+                checked_count=10,
+                source_url="https://prozorro.gov.ua/uk/search/tender?text=12345678",
+            ),
+        )
+
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.search_summary.total_count, 370)
+        self.assertEqual(result.search_summary.checked_count, 10)
+        self.assertEqual(result.stats.procurements_count, 0)
+        self.assertEqual(result.procurements, [])
+        self.assertEqual(result.risk_flags, [])
+
+    def test_lookup_analyzes_confirmed_portal_search_procurement_termination(self):
+        from app.models.company_lookup import ProzorroProcurement, ProzorroSearchSummary
+        from app.services.prozorro_lookup import lookup_prepared_prozorro
+
+        result = lookup_prepared_prozorro(
+            "39582749",
+            source=lambda edrpou: None,
+            portal_search_source=lambda edrpou: ProzorroSearchSummary(
+                total_count=185,
+                checked_count=10,
+                detail_checked_count=1,
+                confirmed_participation_count=1,
+                matched_procurements=[
+                    ProzorroProcurement(
+                        procurement_id="UA-2022-09-06-011139-a",
+                        participated=True,
+                        won=True,
+                        has_contract=True,
+                        contract_terminated=True,
+                        termination_reason="Договір розірвано із ініціативи Постачальника",
+                    )
+                ],
+            ),
+        )
+
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.stats.terminated_contracts_count, 1)
+        self.assertEqual([flag["type"] for flag in result.risk_flags], ["prozorro_termination_found"])
+        self.assertEqual(result.search_summary.total_count, 185)
 
     def test_sync_live_fetch_uses_one_minute_search_budget_by_default(self):
         from app.services.prozorro_lookup import fetch_recent_prozorro_procurements_sync

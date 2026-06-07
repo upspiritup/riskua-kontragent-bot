@@ -109,7 +109,7 @@ class BotResponseTests(unittest.TestCase):
 
         summary = build_risk_summary(result, None)
 
-        self.assertEqual(summary.score, 0)
+        self.assertEqual(summary.score, 5)
         self.assertNotIn("multiple_prozorro_terminations_found", [reason["type"] for reason in summary.reasons])
 
     def test_build_risk_summary_ignores_not_found_prozorro_flags(self):
@@ -132,8 +132,27 @@ class BotResponseTests(unittest.TestCase):
 
         summary = build_risk_summary(result, None)
 
-        self.assertEqual(summary.score, 0)
+        self.assertEqual(summary.score, 5)
         self.assertNotIn("multiple_prozorro_terminations_found", [reason["type"] for reason in summary.reasons])
+
+    def test_build_risk_summary_ignores_prozorro_search_summary_without_flags(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis, ProzorroSearchSummary
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            prozorro_analysis=ProzorroAnalysis(
+                status="partial",
+                search_summary=ProzorroSearchSummary(total_count=370, checked_count=10),
+                risk_flags=[],
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+
+        self.assertEqual(summary.score, 5)
+        self.assertEqual(summary.reasons, [])
 
     def test_build_sources_snapshot_includes_prozorro_analysis(self):
         from app.bot import build_sources_snapshot
@@ -146,6 +165,958 @@ class BotResponseTests(unittest.TestCase):
 
         self.assertEqual(sources["prozorro"]["status"], "found")
         self.assertEqual(sources["prozorro"]["stats"]["procurements_count"], 2)
+
+    def test_build_risk_summary_includes_confirmed_prozorro_sale_risk(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, ProzorroSaleAnalysis, ProzorroSaleRiskAuction
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            prozorro_sale_analysis=ProzorroSaleAnalysis(
+                status="found",
+                checked_count=2,
+                confirmed_count=1,
+                risky_auctions=[
+                    ProzorroSaleRiskAuction(
+                        auction_id="BSE001-UA-20260601-12345",
+                        risk="переможець не виконав умови",
+                        url="https://prozorro.sale/auction/BSE001-UA-20260601-12345",
+                    )
+                ],
+                risk_flags=[
+                    {
+                        "type": "prozorro_sale_risky_auction",
+                        "source": "prozorro_sale",
+                        "status": "found",
+                    }
+                ],
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+
+        self.assertEqual(summary.score, 35)
+        self.assertEqual(summary.reasons[0]["type"], "prozorro_sale_risky_auction")
+        self.assertEqual(summary.reasons[0]["sources"], ["prozorro_sale"])
+
+    def test_build_risk_summary_adds_negative_equity_financial_flags(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, FinancialData, FinancialYearData
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            financial_data=FinancialData(
+                years={
+                    "2025": FinancialYearData(
+                        assets_uah=1_000_000,
+                        liabilities_uah=1_200_000,
+                        equity_uah=-200_000,
+                        net_profit_uah=50_000,
+                    )
+                }
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("negative_equity_found", reason_types)
+        self.assertIn("liabilities_exceed_assets", reason_types)
+
+    def test_low_capital_and_missing_financial_data_create_moderate_soft_risk(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, RiskInput
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="42263098",
+            company_data=CompanyData(
+                short_name="ТОВ «ПАРАГВАЙ ТРЕЙД»",
+                edrpou="42263098",
+                statutory_capital_uah=5001,
+            ),
+            risk_input=RiskInput(statutory_capital_uah=5001),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("low_authorized_capital_found", reason_types)
+        self.assertIn("financial_data_missing", reason_types)
+        self.assertIn("weak_public_financial_profile", reason_types)
+        self.assertGreaterEqual(summary.score, 21)
+        self.assertLessEqual(summary.score, 31)
+        self.assertEqual(summary.level, "medium")
+
+    def test_financial_data_missing_without_low_capital_is_soft_low_risk(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, RiskInput
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(
+                short_name="ТОВ «ТЕСТ»",
+                edrpou="12345678",
+                statutory_capital_uah=100_000,
+            ),
+            risk_input=RiskInput(statutory_capital_uah=100_000),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertNotIn("low_authorized_capital_found", reason_types)
+        self.assertIn("financial_data_missing", reason_types)
+        self.assertNotIn("weak_public_financial_profile", reason_types)
+        self.assertEqual(summary.score, 12)
+
+    def test_low_capital_without_missing_financial_data_is_soft_low_risk(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, FinancialData, FinancialYearData, RiskInput
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(
+                short_name="ТОВ «ТЕСТ»",
+                edrpou="12345678",
+                statutory_capital_uah=5001,
+            ),
+            financial_data=FinancialData(
+                years={"2025": FinancialYearData(revenue_uah=100_000)}
+            ),
+            risk_input=RiskInput(statutory_capital_uah=5001, has_financial_history=True),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("low_authorized_capital_found", reason_types)
+        self.assertNotIn("financial_data_missing", reason_types)
+        self.assertNotIn("weak_public_financial_profile", reason_types)
+        self.assertEqual(summary.score, 8)
+
+    def test_low_capital_with_strong_finances_can_be_compensated(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, FinancialData, FinancialYearData, RiskInput
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(
+                short_name="ТОВ «ТЕСТ»",
+                edrpou="12345678",
+                statutory_capital_uah=5001,
+            ),
+            financial_data=FinancialData(
+                years={
+                    "2024": FinancialYearData(
+                        revenue_uah=50_000_000,
+                        assets_uah=20_000_000,
+                        liabilities_uah=5_000_000,
+                        equity_uah=15_000_000,
+                        net_profit_uah=2_000_000,
+                    ),
+                    "2025": FinancialYearData(
+                        revenue_uah=60_000_000,
+                        assets_uah=25_000_000,
+                        liabilities_uah=6_000_000,
+                        equity_uah=19_000_000,
+                        net_profit_uah=3_000_000,
+                    ),
+                }
+            ),
+            risk_input=RiskInput(statutory_capital_uah=5001, company_age_years=7, has_financial_history=True),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("low_authorized_capital_found", reason_types)
+        self.assertIn("strong_financial_profile", reason_types)
+        self.assertNotIn("financial_data_missing", reason_types)
+        self.assertLess(summary.score, 8)
+
+    def test_unconfirmed_large_prozorro_search_noise_adds_only_small_weight(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis, ProzorroSearchSummary
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="42263098",
+            prozorro_analysis=ProzorroAnalysis(
+                status="partial",
+                search_summary=ProzorroSearchSummary(
+                    total_count=1406,
+                    checked_count=50,
+                    detail_checked_count=50,
+                    confirmed_participation_count=0,
+                    items=[
+                        {
+                            "tenderID": "UA-2026-01-01-000001-a",
+                            "status": "unsuccessful",
+                            "risk_marker_codes": ["termination"],
+                        }
+                    ],
+                ),
+                risk_flags=[],
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("prozorro_unconfirmed_search_noise", reason_types)
+        self.assertNotIn("prozorro_termination_found", reason_types)
+        self.assertEqual(summary.score, 5)
+
+    def test_low_capital_missing_finance_and_unconfirmed_search_noise_scores_about_27(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis, ProzorroSearchSummary, RiskInput
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="42263098",
+            company_data=CompanyData(
+                short_name="ТОВ «ПАРАГВАЙ ТРЕЙД»",
+                edrpou="42263098",
+                statutory_capital_uah=5001,
+            ),
+            risk_input=RiskInput(statutory_capital_uah=5001),
+            prozorro_analysis=ProzorroAnalysis(
+                status="partial",
+                search_summary=ProzorroSearchSummary(
+                    total_count=1406,
+                    checked_count=50,
+                    detail_checked_count=50,
+                    confirmed_participation_count=0,
+                    items=[
+                        {
+                            "tenderID": "UA-2026-01-01-000001-a",
+                            "status": "unsuccessful",
+                            "risk_marker_codes": ["termination"],
+                        }
+                    ],
+                ),
+                risk_flags=[],
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("low_authorized_capital_found", reason_types)
+        self.assertIn("financial_data_missing", reason_types)
+        self.assertIn("weak_public_financial_profile", reason_types)
+        self.assertIn("prozorro_unconfirmed_search_noise", reason_types)
+        self.assertGreaterEqual(summary.score, 25)
+        self.assertLessEqual(summary.score, 30)
+        self.assertEqual(summary.level, "medium")
+
+    def test_low_capital_missing_finance_reason_lines_are_shown(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, RiskInput
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="42263098",
+            company_data=CompanyData(
+                short_name="ТОВ «ПАРАГВАЙ ТРЕЙД»",
+                edrpou="42263098",
+                status="Зареєстровано",
+                registration_date="25.06.2018",
+                statutory_capital_uah=5001,
+            ),
+            risk_input=RiskInput(statutory_capital_uah=5001, company_age_years=8),
+        )
+
+        response = build_edrpou_response("42263098", result)
+        reason_block = response.split("Причини оцінки:", 1)[1].split("Загальний ризик:", 1)[0]
+
+        self.assertIn("⚠️ Статутний капітал дуже низький.", reason_block)
+        self.assertIn("⚠️ Повні фінансові показники у доступних джерелах не знайдено.", reason_block)
+        self.assertIn("⚠️ Публічний фінансовий профіль слабко підтверджений.", reason_block)
+        self.assertIn("Загальний ризик: помірний", response)
+
+    def build_loss_summary(
+        self,
+        loss: int,
+        *,
+        assets: int | None = None,
+        liabilities: int | None = None,
+        revenue: int | None = None,
+        equity: int | None = None,
+    ):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, FinancialData, FinancialYearData
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            financial_data=FinancialData(
+                years={
+                    "2025": FinancialYearData(
+                        revenue_uah=revenue,
+                        assets_uah=assets,
+                        liabilities_uah=liabilities,
+                        equity_uah=equity,
+                        net_profit_uah=loss,
+                    )
+                }
+            ),
+        )
+
+        return build_risk_summary(result, None)
+
+    def test_loss_amounts_create_expected_single_loss_flag(self):
+        loss_cases = [
+            (-5_000, "small_loss_found", 5),
+            (-26_000, "medium_loss_found", 5),
+            (-150_000, "large_loss_found", 10),
+            (-2_000_000, "large_loss_found", 10),
+            (-467_000_000, "large_loss_found", 10),
+        ]
+        loss_flag_types = {
+            "small_loss_found",
+            "medium_loss_found",
+            "large_loss_found",
+            "very_large_loss_found",
+            "critical_loss_found",
+        }
+
+        for loss, expected_type, expected_score in loss_cases:
+            with self.subTest(loss=loss):
+                summary = self.build_loss_summary(loss)
+                reason_types = [reason["type"] for reason in summary.reasons]
+                found_loss_flags = [reason_type for reason_type in reason_types if reason_type in loss_flag_types]
+
+                self.assertEqual(found_loss_flags, [expected_type])
+                self.assertEqual(summary.score, expected_score)
+
+    def test_ukrposhta_scale_loss_is_not_critical_when_balance_is_healthy(self):
+        summary = self.build_loss_summary(
+            -204_779_000,
+            assets=14_983_924_000,
+            liabilities=9_979_299_000,
+            equity=5_004_625_000,
+        )
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("large_loss_found", reason_types)
+        self.assertNotIn("critical_loss_found", reason_types)
+        self.assertNotIn("weak_financial_position", reason_types)
+
+    def test_loss_greater_than_revenue_is_critical(self):
+        summary = self.build_loss_summary(
+            -12_000_000,
+            revenue=10_000_000,
+            assets=300_000_000,
+            liabilities=100_000_000,
+            equity=200_000_000,
+        )
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("critical_loss_found", reason_types)
+
+    def test_loss_to_assets_at_least_ten_percent_is_critical(self):
+        summary = self.build_loss_summary(
+            -20_000_000,
+            assets=100_000_000,
+            liabilities=40_000_000,
+            equity=60_000_000,
+        )
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("critical_loss_found", reason_types)
+
+    def test_medium_loss_with_large_assets_is_not_critical(self):
+        summary = self.build_loss_summary(
+            -26_000,
+            assets=396_000_000,
+            liabilities=100_000_000,
+        )
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("medium_loss_found", reason_types)
+        self.assertNotIn("critical_loss_found", reason_types)
+        self.assertNotIn("very_large_loss_found", reason_types)
+
+    def test_critical_loss_with_bad_balance_strengthens_financial_position(self):
+        summary = self.build_loss_summary(
+            -467_000_000,
+            assets=66_000_000,
+            liabilities=1_828_000_000,
+            equity=-1_762_000_000,
+        )
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("critical_loss_found", reason_types)
+        self.assertIn("negative_equity_found", reason_types)
+        self.assertIn("liabilities_exceed_assets", reason_types)
+        self.assertIn("severe_negative_equity", reason_types)
+        self.assertIn("weak_financial_position", reason_types)
+
+    def test_large_loss_with_negative_equity_is_critical(self):
+        summary = self.build_loss_summary(
+            -20_000_000,
+            assets=300_000_000,
+            liabilities=200_000_000,
+            equity=-10_000_000,
+        )
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("critical_loss_found", reason_types)
+        self.assertIn("negative_equity_found", reason_types)
+
+    def test_large_loss_with_liabilities_above_assets_is_critical(self):
+        summary = self.build_loss_summary(
+            -20_000_000,
+            assets=300_000_000,
+            liabilities=350_000_000,
+            equity=10_000_000,
+        )
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("critical_loss_found", reason_types)
+        self.assertIn("liabilities_exceed_assets", reason_types)
+
+    def test_build_risk_summary_adds_losses_with_negative_equity_flag(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, FinancialData, FinancialYearData
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            financial_data=FinancialData(
+                years={
+                    "2025": FinancialYearData(
+                        assets_uah=1_000_000,
+                        liabilities_uah=1_400_000,
+                        equity_uah=-400_000,
+                        net_profit_uah=-120_000,
+                    )
+                }
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("losses_with_negative_equity", reason_types)
+        self.assertIn("weak_financial_position", reason_types)
+
+    def test_build_risk_summary_adds_negative_equity_multiple_years_flag(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, FinancialData, FinancialYearData
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            financial_data=FinancialData(
+                years={
+                    "2024": FinancialYearData(assets_uah=900_000, liabilities_uah=1_000_000, equity_uah=-100_000),
+                    "2025": FinancialYearData(assets_uah=1_000_000, liabilities_uah=1_300_000, equity_uah=-300_000),
+                }
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+
+        self.assertIn("negative_equity_multiple_years", [reason["type"] for reason in summary.reasons])
+
+    def test_build_risk_summary_adds_severe_negative_equity_flag(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, FinancialData, FinancialYearData
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="25102871",
+            financial_data=FinancialData(
+                years={
+                    "2023": FinancialYearData(
+                        assets_uah=66_773_100,
+                        liabilities_uah=1_828_097_500,
+                        equity_uah=-1_761_324_400,
+                        net_profit_uah=-467_497_000,
+                    )
+                }
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("severe_negative_equity", reason_types)
+        self.assertIn("weak_financial_position", reason_types)
+
+    def test_build_risk_summary_adds_positive_financial_profile_and_reducer(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, CourtData, FinancialData, FinancialYearData, RiskInput
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="30487219",
+            risk_input=RiskInput(company_age_years=25),
+            court_data=CourtData(has_court_mentions=True, court_mentions_count=25),
+            financial_data=FinancialData(
+                years={
+                    "2024": FinancialYearData(
+                        revenue_uah=200_000_000,
+                        assets_uah=70_000_000,
+                        liabilities_uah=40_000_000,
+                        equity_uah=30_000_000,
+                        net_profit_uah=5_000_000,
+                    ),
+                    "2025": FinancialYearData(
+                        revenue_uah=250_000_000,
+                        assets_uah=90_000_000,
+                        liabilities_uah=45_000_000,
+                        equity_uah=45_000_000,
+                        net_profit_uah=8_000_000,
+                    ),
+                }
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("positive_profit_found", reason_types)
+        self.assertIn("positive_equity_found", reason_types)
+        self.assertIn("equity_growth_found", reason_types)
+        self.assertIn("assets_exceed_liabilities", reason_types)
+        self.assertIn("strong_revenue_found", reason_types)
+        self.assertIn("strong_financial_profile", reason_types)
+        self.assertEqual(summary.score, 5)
+
+    def test_build_risk_summary_adds_very_strong_financial_profile_for_large_healthy_company(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, FinancialData, FinancialYearData, RiskInput
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="30487219",
+            risk_input=RiskInput(company_age_years=25),
+            financial_data=FinancialData(
+                years={
+                    "2024": FinancialYearData(
+                        revenue_uah=180_000_000_000,
+                        assets_uah=55_000_000_000,
+                        liabilities_uah=42_000_000_000,
+                        equity_uah=13_000_000_000,
+                        net_profit_uah=2_900_000_000,
+                    ),
+                    "2025": FinancialYearData(
+                        revenue_uah=247_348_831_000,
+                        assets_uah=62_752_080_000,
+                        liabilities_uah=44_228_798_000,
+                        equity_uah=18_523_282_000,
+                        net_profit_uah=3_427_397_000,
+                    ),
+                }
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("very_strong_financial_profile", reason_types)
+        self.assertNotIn("negative_equity_found", reason_types)
+        self.assertEqual(summary.score, 5)
+
+    def test_very_many_court_mentions_create_information_floor_for_healthy_company(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, CourtData, FinancialData, FinancialYearData, RiskInput
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="30487219",
+            risk_input=RiskInput(company_age_years=25),
+            court_data=CourtData(has_court_mentions=True, court_mentions_count=26_690),
+            financial_data=FinancialData(
+                years={
+                    "2024": FinancialYearData(
+                        revenue_uah=180_000_000_000,
+                        assets_uah=55_000_000_000,
+                        liabilities_uah=42_000_000_000,
+                        equity_uah=13_000_000_000,
+                        net_profit_uah=2_900_000_000,
+                    ),
+                    "2025": FinancialYearData(
+                        revenue_uah=247_348_831_000,
+                        assets_uah=62_752_080_000,
+                        liabilities_uah=44_228_798_000,
+                        equity_uah=18_523_282_000,
+                        net_profit_uah=3_427_397_000,
+                    ),
+                }
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("very_many_court_mentions_found", reason_types)
+        self.assertEqual(summary.score, 8)
+
+    def test_six_court_documents_keep_small_but_visible_score_even_with_strong_finances(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, CourtData, FinancialData, FinancialYearData, RiskInput
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="40483430",
+            company_data=CompanyData(
+                short_name="ТОВ «АВАРТЕХ УКРАЇНА»",
+                edrpou="40483430",
+                statutory_capital_uah=5_000,
+            ),
+            court_data=CourtData(has_court_mentions=True, court_mentions_count=6),
+            financial_data=FinancialData(
+                years={
+                    "2023": FinancialYearData(
+                        revenue_uah=24_000_000,
+                        assets_uah=8_000_000,
+                        liabilities_uah=3_300_000,
+                        equity_uah=4_700_000,
+                        net_profit_uah=900_000,
+                    ),
+                    "2025": FinancialYearData(
+                        revenue_uah=36_637_100,
+                        assets_uah=12_144_600,
+                        liabilities_uah=4_600_100,
+                        equity_uah=7_544_500,
+                        net_profit_uah=1_764_100,
+                    ),
+                }
+            ),
+            risk_input=RiskInput(
+                company_age_years=10,
+                statutory_capital_uah=5_000,
+                has_court_mentions=True,
+                court_mentions_count=6,
+                has_financial_history=True,
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertIn("court_cases_found", reason_types)
+        self.assertIn("several_court_mentions_found", reason_types)
+        self.assertIn("low_authorized_capital_found", reason_types)
+        self.assertEqual(summary.score, 8)
+
+    def test_large_statutory_capital_with_negative_equity_does_not_get_financial_reducer(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, FinancialData, FinancialYearData, RiskInput
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="25102871",
+            risk_input=RiskInput(statutory_capital_uah=426_500_601),
+            financial_data=FinancialData(
+                years={
+                    "2023": FinancialYearData(
+                        revenue_uah=563_400,
+                        assets_uah=66_773_100,
+                        liabilities_uah=1_828_097_500,
+                        equity_uah=-1_761_324_400,
+                        net_profit_uah=-467_497_000,
+                    )
+                }
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+        reason_types = [reason["type"] for reason in summary.reasons]
+
+        self.assertNotIn("strong_financial_profile", reason_types)
+        self.assertNotIn("very_strong_financial_profile", reason_types)
+        self.assertIn("weak_financial_position", reason_types)
+        self.assertGreaterEqual(summary.score, 65)
+
+    def test_positive_financial_reason_lines_are_shown_for_healthy_company(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, FinancialData, FinancialYearData, RiskInput
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="30487219",
+            company_data=CompanyData(
+                short_name="ТОВ «АТБ-МАРКЕТ»",
+                edrpou="30487219",
+                status="Зареєстровано",
+                registration_date="19.07.1999",
+                main_activity_code="47.11",
+                main_activity_name="Роздрібна торгівля",
+            ),
+            risk_input=RiskInput(company_age_years=25),
+            financial_data=FinancialData(
+                years={
+                    "2024": FinancialYearData(
+                        revenue_uah=180_000_000_000,
+                        assets_uah=55_000_000_000,
+                        liabilities_uah=42_000_000_000,
+                        equity_uah=13_000_000_000,
+                        net_profit_uah=2_900_000_000,
+                    ),
+                    "2025": FinancialYearData(
+                        revenue_uah=247_348_831_000,
+                        assets_uah=62_752_080_000,
+                        liabilities_uah=44_228_798_000,
+                        equity_uah=18_523_282_000,
+                        net_profit_uah=3_427_397_000,
+                    ),
+                }
+            ),
+        )
+
+        response = build_edrpou_response("30487219", result)
+        reason_block = response.split("Причини оцінки:", 1)[1].split("Загальний ризик:", 1)[0]
+
+        self.assertIn(
+            "✅ Фінансовий профіль виглядає стабільним: прибуток, активи перевищують зобов’язання, власний капітал позитивний.",
+            reason_block,
+        )
+        self.assertIn("✅ Власний капітал зростає.", reason_block)
+        self.assertIn("✅ Компанія має значний дохід/активи.", reason_block)
+
+    def test_found_company_response_groups_overlapping_bankruptcy_and_financial_reasons(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            CourtData,
+            FinancialData,
+            FinancialYearData,
+            ProzorroSaleAnalysis,
+            ProzorroSaleRiskAuction,
+        )
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="25102871",
+            company_data=CompanyData(
+                short_name="ТОВ «УКРІНВЕСТ»",
+                edrpou="25102871",
+                status="припинено",
+                registration_date="27.08.1997",
+            ),
+            financial_data=FinancialData(
+                years={
+                    "2021": FinancialYearData(
+                        assets_uah=100_000_000,
+                        liabilities_uah=1_349_696_900,
+                        equity_uah=-1_249_696_900,
+                        net_profit_uah=-100_000_000,
+                    ),
+                    "2023": FinancialYearData(
+                        assets_uah=66_773_100,
+                        liabilities_uah=1_828_097_500,
+                        equity_uah=-1_761_324_400,
+                        net_profit_uah=-467_497_000,
+                    ),
+                }
+            ),
+            court_data=CourtData(risk_flags=["bankruptcy_found"]),
+            prozorro_sale_analysis=ProzorroSaleAnalysis(
+                status="found",
+                checked_count=5,
+                confirmed_count=5,
+                risky_auctions=[
+                    ProzorroSaleRiskAuction(
+                        auction_id="BRD001-UA-20250508-60050",
+                        risk="аукціон не відбувся; ознаки банкрутства / ліквідаційна маса",
+                        url="https://prozorro.sale/auction/BRD001-UA-20250508-60050/",
+                    )
+                ],
+                risk_flags=[
+                    {
+                        "type": "prozorro_sale_risky_auction",
+                        "source": "prozorro_sale",
+                        "status": "found",
+                        "raw_text": "BRD001-UA-20250508-60050 — аукціон не відбувся; ознаки банкрутства / ліквідаційна маса",
+                    },
+                    {
+                        "type": "bankruptcy_found",
+                        "source": "prozorro_sale",
+                        "status": "found",
+                        "raw_text": "BRD001-UA-20250508-60050 — аукціон не відбувся; ознаки банкрутства / ліквідаційна маса",
+                    },
+                ],
+            ),
+        )
+
+        response = build_edrpou_response("25102871", result)
+        reason_block = response.split("Причини оцінки:", 1)[1].split("Загальний ризик:", 1)[0]
+
+        self.assertIn("Фінансова звітність показує комплексні проблеми", reason_block)
+        self.assertEqual(reason_block.count("Фінансова звітність показує"), 1)
+        self.assertNotIn("Фінансова звітність показує від’ємний власний капітал.", reason_block)
+        self.assertNotIn("Фінансова звітність показує, що зобов’язання перевищують активи.", reason_block)
+        self.assertNotIn("Компанія має збиток і від’ємний власний капітал.", reason_block)
+        self.assertNotIn("У Prozorro.Sale знайдено підтверджений продаж майна", reason_block)
+        self.assertIn("Знайдено згадки або записи, пов'язані з банкрутством.", reason_block)
+        self.assertNotIn("✅ Компанія працює тривалий час.", response)
+        self.assertIn("Загальний ризик: критичний", response)
+
+    def test_found_company_response_shows_prozorro_sale_only_for_confirmed_risks(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroSaleAnalysis,
+            ProzorroSaleRiskAuction,
+        )
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(short_name='ТОВ "Тест"', edrpou="12345678", status="зареєстровано"),
+            prozorro_sale_analysis=ProzorroSaleAnalysis(
+                status="found",
+                checked_count=2,
+                confirmed_count=1,
+                risky_auctions=[
+                    ProzorroSaleRiskAuction(
+                        auction_id="BSE001-UA-20260601-12345",
+                        risk="переможець не виконав умови",
+                        url="https://prozorro.sale/auction/BSE001-UA-20260601-12345",
+                    )
+                ],
+                risk_flags=[
+                    {
+                        "type": "prozorro_sale_risky_auction",
+                        "source": "prozorro_sale",
+                        "status": "found",
+                    }
+                ],
+            ),
+        )
+
+        response = build_edrpou_response("12345678", result)
+
+        self.assertIn("Prozorro.Sale:", response)
+        self.assertIn("⚠️ Знайдено ризикові аукціони: 1", response)
+        self.assertIn("1. BSE001-UA-20260601-12345 — переможець не виконав умови", response)
+        self.assertIn("https://prozorro.sale/auction/BSE001-UA-20260601-12345", response)
+        self.assertIn("Джерела: Opendatabot, Prozorro.Sale", response)
+
+    def test_found_company_response_shows_prozorro_sale_debtor_mention_as_information(self):
+        from app.bot import build_edrpou_response, build_risk_summary
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroSaleAnalysis,
+            ProzorroSaleRiskAuction,
+        )
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="30487219",
+            company_data=CompanyData(short_name='ТОВ "АТБ Маркет"', edrpou="30487219", status="зареєстровано"),
+            prozorro_sale_analysis=ProzorroSaleAnalysis(
+                status="found",
+                checked_count=1,
+                confirmed_count=1,
+                informational_mentions=[
+                    ProzorroSaleRiskAuction(
+                        auction_id="UA-PS-2021-08-20-000052-3",
+                        risk="компанія згадується у складі дебіторської заборгованості банкрута",
+                        url="https://prozorro.sale/auction/UA-PS-2021-08-20-000052-3/",
+                        role="debtor_mention",
+                    )
+                ],
+                risk_flags=[
+                    {
+                        "type": "prozorro_sale_debtor_mention",
+                        "source": "prozorro_sale",
+                        "status": "found",
+                        "raw_text": "UA-PS-2021-08-20-000052-3 — компанія згадується у складі дебіторської заборгованості банкрута.",
+                    }
+                ],
+            ),
+        )
+
+        response = build_edrpou_response("30487219", result)
+        risk_summary = build_risk_summary(result, None)
+
+        self.assertIn("Prozorro.Sale:", response)
+        self.assertIn(
+            "Prozorro.Sale: компанія згадується у складі дебіторської заборгованості банкрута. Це не означає банкрутство самої компанії.",
+            response,
+        )
+        self.assertNotIn("⚠️ Знайдено ризикові аукціони", response)
+        self.assertNotIn("банкрутство самої компанії", response.split("Причини оцінки:", 1)[1])
+        self.assertEqual(risk_summary.score, 5)
+        self.assertEqual([reason["type"] for reason in risk_summary.reasons], ["prozorro_sale_debtor_mention"])
+
+    def test_found_company_response_shows_unsuccessful_prozorro_sale_auction_as_information(self):
+        from app.bot import build_edrpou_response, build_risk_summary
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroSaleAnalysis,
+            ProzorroSaleRiskAuction,
+        )
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="32265298",
+            company_data=CompanyData(short_name='ТОВ "Приклад"', edrpou="32265298", status="зареєстровано"),
+            prozorro_sale_analysis=ProzorroSaleAnalysis(
+                status="found",
+                checked_count=2,
+                confirmed_count=2,
+                informational_mentions=[
+                    ProzorroSaleRiskAuction(
+                        auction_id="SPE001-UA-20260401-11111",
+                        risk="аукціон не відбувся",
+                        url="https://prozorro.sale/auction/SPE001-UA-20260401-11111/",
+                        role="auction_participant",
+                    ),
+                    ProzorroSaleRiskAuction(
+                        auction_id="SPE001-UA-20260402-22222",
+                        risk="аукціон не відбувся",
+                        url="https://prozorro.sale/auction/SPE001-UA-20260402-22222/",
+                        role="auction_participant",
+                    ),
+                ],
+                risk_flags=[],
+            ),
+        )
+
+        response = build_edrpou_response("32265298", result)
+        risk_summary = build_risk_summary(result, None)
+
+        self.assertIn("Prozorro.Sale:", response)
+        self.assertIn(
+            "Prozorro.Sale: знайдено аукціони з участю/згадкою компанії. Негативної дії саме з боку компанії не підтверджено.",
+            response,
+        )
+        self.assertNotIn("⚠️ Знайдено ризикові аукціони", response)
+        self.assertEqual(risk_summary.score, 5)
+        self.assertEqual(risk_summary.reasons, [])
+
+    def test_found_company_response_omits_prozorro_sale_without_risks(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroSaleAnalysis
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(short_name='ТОВ "Тест"', edrpou="12345678", status="зареєстровано"),
+            prozorro_sale_analysis=ProzorroSaleAnalysis(status="not_found", checked_count=2, confirmed_count=1),
+        )
+
+        response = build_edrpou_response("12345678", result)
+
+        self.assertNotIn("Prozorro.Sale:", response)
+        self.assertNotIn("Prozorro.Sale", response.split("Джерело: Opendatabot")[-1])
 
     def test_found_company_response_shows_prozorro_block_when_analysis_exists(self):
         from app.bot import build_edrpou_response
@@ -184,11 +1155,16 @@ class BotResponseTests(unittest.TestCase):
         )
 
         response = build_edrpou_response("12345678", result)
+        lines = response.splitlines()
 
         self.assertIn("Prozorro:", response)
-        self.assertIn("Участей: 4", response)
-        self.assertIn("Перемог: 0", response)
-        self.assertIn("Договорів: 0", response)
+        self.assertIn("Закупівель: 4", lines)
+        self.assertIn("Участей: 4", lines)
+        self.assertNotIn("Перемог: 0", lines)
+        self.assertNotIn("Договорів: 0", lines)
+        self.assertNotIn("Завершених договорів: 0", lines)
+        self.assertNotIn("Розірваних договорів: 0", lines)
+        self.assertNotIn("Дискваліфікацій: 0", lines)
         self.assertIn("Остання участь: 2025-03-10", response)
         self.assertIn("Сам факт участі не є ризиком", response)
         self.assertIn("Джерела: Opendatabot, Prozorro", response)
@@ -233,6 +1209,418 @@ class BotResponseTests(unittest.TestCase):
         self.assertIn("Score не підвищено.", response)
         self.assertIn("Джерело: Opendatabot", response)
         self.assertNotIn("Джерела: Opendatabot, Prozorro", response)
+
+    def test_found_company_response_shows_prozorro_portal_summary(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroAnalysis,
+            ProzorroSearchSummary,
+        )
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(
+                short_name='ТОВ "Тест"',
+                edrpou="12345678",
+                status="зареєстровано",
+                tenders_count=7,
+                tenders_text="7 тендерів",
+            ),
+            prozorro_analysis=ProzorroAnalysis(
+                status="partial",
+                search_summary=ProzorroSearchSummary(
+                    total_count=370,
+                    checked_count=10,
+                    detail_checked_count=10,
+                    confirmed_participation_count=1,
+                    source_url="https://prozorro.gov.ua/uk/search/tender?text=12345678",
+                    items=[
+                        {
+                            "tenderID": f"UA-2026-01-{index:02d}-000001-a",
+                            "title": f"Постачання товарів {index}",
+                            "status": "cancelled" if index == 8 else "complete",
+                            "buyer_name": "Тестовий замовник",
+                            "expected_value_uah": 125000.0 + index,
+                        }
+                        for index in range(1, 11)
+                    ],
+                ),
+            ),
+        )
+
+        with self.assertLogs(level="INFO") as logs:
+            response = build_edrpou_response("12345678", result)
+
+        self.assertIn("Prozorro:", response)
+        self.assertIn("Результатів у пошуку Prozorro: 370.", response)
+        self.assertIn("Перевірено у видачі: 10.", response)
+        self.assertIn("Підтверджено участь компанії серед перевірених: 1.", response)
+        self.assertNotIn("Перші закупівлі у видачі:", response)
+        self.assertNotIn("UA-2026-01-01-000001-a", response)
+        self.assertNotIn("Статус: complete; замовник: Тестовий замовник", response)
+        self.assertIn("У перших 10 результатах пошуку знайдено явні маркери: 1.", response)
+        self.assertIn("Участей/перемог/договорів: дані уточнюються за деталями закупівель.", response)
+        self.assertNotIn("Примітка: Prozorro-блок є пошуковим оглядом.", response)
+        self.assertNotIn("Детальна історія закупівель Prozorro тимчасово недоступна", response)
+        self.assertNotIn("Закупівель: 0", response)
+        self.assertIn("Джерела: Opendatabot, Prozorro", response)
+        self.assertIn("Prozorro report mode: summary", "\n".join(logs.output))
+        self.assertIn("Prozorro records_count=0", "\n".join(logs.output))
+        self.assertIn("Prozorro source added=true", "\n".join(logs.output))
+
+    def test_prozorro_search_summary_says_when_company_is_not_confirmed(self):
+        from app.bot import build_edrpou_response, build_risk_summary
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroAnalysis,
+            ProzorroSearchSummary,
+        )
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(
+                short_name='ТОВ "Тест"',
+                edrpou="12345678",
+                status="зареєстровано",
+            ),
+            prozorro_analysis=ProzorroAnalysis(
+                status="partial",
+                search_summary=ProzorroSearchSummary(
+                    total_count=53,
+                    checked_count=10,
+                    detail_checked_count=10,
+                    confirmed_participation_count=0,
+                    items=[
+                        {
+                            "tenderID": f"UA-2026-02-{index:02d}-000001-a",
+                            "title": f"Пошуковий збіг {index}",
+                            "status": "unsuccessful" if index == 3 else "complete",
+                            "buyer_name": "Інший замовник",
+                            "expected_value_uah": 50000.0 + index,
+                        }
+                        for index in range(1, 11)
+                    ],
+                ),
+                risk_flags=[],
+            ),
+        )
+
+        response = build_edrpou_response("12345678", result)
+        risk_summary = build_risk_summary(result, None)
+
+        self.assertIn("Підтверджено участь компанії серед перевірених: 0.", response)
+        self.assertNotIn("Участей/перемог/договорів:", response)
+        self.assertIn(
+            "Частина результатів пошуку може бути текстовими збігами, а не закупівлями цієї компанії.",
+            response,
+        )
+        self.assertIn(
+            (
+                "У пошуковій видачі є потенційні маркери: 1, але участь компанії "
+                "в цих результатах не підтверджена, тому вони не враховані як ризик."
+            ),
+            response,
+        )
+        self.assertNotIn("Примітка: Prozorro-блок є пошуковим оглядом.", response)
+        self.assertEqual(
+            [line for line in response.splitlines() if line.startswith("Джерел")][-1],
+            "Джерела: Opendatabot, Prozorro search та інші джерела",
+        )
+        self.assertEqual(risk_summary.score, 5)
+        self.assertEqual(risk_summary.reasons, [])
+
+    def test_prozorro_search_scan_no_marker_text_is_precise(self):
+        from app.bot import build_prozorro_search_risk_scan_line
+
+        line = build_prozorro_search_risk_scan_line(
+            [{"tenderID": f"UA-2026-01-{index:02d}-000001-a", "status": "complete"} for index in range(1, 11)]
+        )
+
+        self.assertEqual(
+            line,
+            (
+                "У перших 10 результатах пошуку не знайдено явних маркерів: "
+                "скасування, розірвання, скарги або моніторингу."
+            ),
+        )
+
+    def test_prozorro_search_scan_without_confirmed_company_and_without_markers_is_short(self):
+        from app.bot import build_prozorro_search_risk_scan_line
+
+        line = build_prozorro_search_risk_scan_line(
+            [{"tenderID": f"UA-2026-01-{index:02d}-000001-a", "status": "complete"} for index in range(1, 11)],
+            confirmed_participation_count=0,
+        )
+
+        self.assertEqual(
+            line,
+            "У перших перевірених результатах не знайдено підтверджених ризикових ознак, пов’язаних із компанією.",
+        )
+
+    def test_prozorro_search_scan_uses_all_checked_items_not_only_first_ten(self):
+        from app.bot import build_prozorro_search_risk_scan_line
+
+        items = [
+            {"tenderID": f"UA-2026-01-{index:02d}-000001-a", "status": "complete"}
+            for index in range(1, 51)
+        ]
+        items[29]["risk_marker_codes"] = ["termination"]
+
+        line = build_prozorro_search_risk_scan_line(items, confirmed_participation_count=0)
+
+        self.assertEqual(
+            line,
+            (
+                "У пошуковій видачі є потенційні маркери: 1, але участь компанії "
+                "в цих результатах не підтверджена, тому вони не враховані як ризик."
+            ),
+        )
+
+    def test_detailed_prozorro_block_shows_checked_count_and_detected_signals(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroAnalysis,
+            ProzorroProcurement,
+            ProzorroSearchSummary,
+            ProzorroStats,
+        )
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(short_name='ТОВ "Тест"', edrpou="12345678", status="зареєстровано"),
+            prozorro_analysis=ProzorroAnalysis(
+                status="found",
+                search_summary=ProzorroSearchSummary(
+                    total_count=118,
+                    checked_count=50,
+                    detail_checked_count=50,
+                    confirmed_participation_count=3,
+                    items=[
+                        {"tenderID": "UA-1", "participation_confirmed": True, "risk_marker_codes": ["monitoring"]},
+                        {"tenderID": "UA-2", "participation_confirmed": True, "risk_marker_codes": ["complaint"]},
+                    ],
+                ),
+                stats=ProzorroStats(
+                    procurements_count=3,
+                    participations_count=3,
+                    wins_count=1,
+                    contracts_count=2,
+                    terminated_contracts_count=1,
+                    disqualifications_count=1,
+                    complaints_count=1,
+                    win_rate_percent=33.33,
+                ),
+                procurements=[
+                    ProzorroProcurement(
+                        procurement_id="UA-1",
+                        participated=True,
+                        won=True,
+                        has_contract=True,
+                        contract_terminated=True,
+                        complaints_count=1,
+                    ),
+                    ProzorroProcurement(procurement_id="UA-2", participated=True, disqualified=True),
+                    ProzorroProcurement(procurement_id="UA-3", participated=True, has_contract=True),
+                ],
+                summary="Prozorro: участей 3, перемог 1, договорів 2, розірвань 1.",
+            ),
+        )
+
+        response = build_edrpou_response("12345678", result)
+
+        self.assertIn("Результатів у пошуку Prozorro: 118.", response)
+        self.assertIn("Перевірено у видачі: 50.", response)
+        self.assertIn("Підтверджено закупівель із компанією: 3.", response)
+        self.assertIn("Участей: 3", response)
+        self.assertIn("Перемог: 1", response)
+        self.assertIn("Договорів: 2", response)
+        self.assertIn("Розірваних договорів: 1", response)
+        self.assertIn("Дискваліфікацій: 1", response)
+        self.assertIn("Скарг/вимог: 1", response)
+        self.assertIn("Моніторингів: 1", response)
+        self.assertIn("⚠️ Виявлені сигнали:", response)
+        self.assertIn("• Була дискваліфікація учасника.", response)
+        self.assertIn("• Є розірвання договору.", response)
+        self.assertIn("• Є скарги/вимоги у закупівлях.", response)
+        self.assertIn("• Є моніторинг закупівлі.", response)
+
+    def test_detailed_prozorro_block_shows_role_based_summary(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroAnalysis,
+            ProzorroProcurement,
+            ProzorroSearchSummary,
+            ProzorroStats,
+        )
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(short_name='ТОВ "Тест"', edrpou="12345678", status="зареєстровано"),
+            prozorro_analysis=ProzorroAnalysis(
+                status="found",
+                search_summary=ProzorroSearchSummary(
+                    total_count=185,
+                    checked_count=50,
+                    detail_checked_count=50,
+                    confirmed_participation_count=3,
+                    participant_count=1,
+                    winner_count=0,
+                    supplier_contract_count=0,
+                    buyer_count=2,
+                    items=[
+                        {"tenderID": "UA-1", "participation_confirmed": True, "confirmed_roles": ["buyer"]},
+                        {"tenderID": "UA-2", "participation_confirmed": True, "confirmed_roles": ["buyer"]},
+                        {"tenderID": "UA-3", "participation_confirmed": True, "confirmed_roles": ["participant"]},
+                    ],
+                ),
+                stats=ProzorroStats(
+                    procurements_count=3,
+                    participations_count=1,
+                    wins_count=0,
+                    contracts_count=0,
+                    terminated_contracts_count=0,
+                    disqualifications_count=0,
+                ),
+                procurements=[ProzorroProcurement(procurement_id="UA-3", participated=True)],
+            ),
+        )
+
+        response = build_edrpou_response("12345678", result)
+
+        self.assertIn("Підтверджено закупівель із компанією: 3.", response)
+        self.assertIn("Ролі:", response)
+        self.assertIn("• учасник: 1", response)
+        self.assertIn("• переможець/постачальник: 0", response)
+        self.assertIn("• замовник: 2", response)
+        self.assertNotIn("Негативні факти серед перевірених:", response)
+        self.assertIn("Висновок: підтверджених негативних Prozorro-фактів серед перевірених закупівель не знайдено.", response)
+        self.assertNotIn("Підтверджено збігів компанії у пошуку серед перевірених", response)
+
+    def test_buyer_only_prozorro_block_does_not_show_supplier_risk_or_duplicate_counts(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroAnalysis,
+            ProzorroProcurement,
+            ProzorroSearchSummary,
+            ProzorroStats,
+        )
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="21560045",
+            company_data=CompanyData(short_name="АТ «УКРПОШТА»", edrpou="21560045", status="Зареєстровано"),
+            prozorro_analysis=ProzorroAnalysis(
+                status="found",
+                search_summary=ProzorroSearchSummary(
+                    total_count=10_000,
+                    checked_count=50,
+                    detail_checked_count=50,
+                    confirmed_participation_count=49,
+                    buyer_count=49,
+                    items=[
+                        {
+                            "tenderID": "UA-BUYER-1",
+                            "participation_confirmed": True,
+                            "confirmed_roles": ["buyer"],
+                            "risk_marker_codes": ["monitoring"],
+                        }
+                    ],
+                ),
+                stats=ProzorroStats(
+                    procurements_count=49,
+                    participations_count=0,
+                    wins_count=0,
+                    contracts_count=0,
+                    complaints_count=1,
+                ),
+                procurements=[ProzorroProcurement(procurement_id="UA-BUYER-1", complaints_count=1)],
+                summary="Prozorro: участей 0, перемог 0, договорів 0, розірвань 0.",
+            ),
+        )
+
+        response = build_edrpou_response("21560045", result)
+        lines = response.splitlines()
+
+        self.assertIn("Підтверджено закупівель із компанією: 49.", response)
+        self.assertIn("• замовник: 49", response)
+        self.assertNotIn("Закупівель: 49", lines)
+        self.assertNotIn("Prozorro: участей 0, перемог 0, договорів 0, розірвань 0.", response)
+        self.assertIn("Сигнали серед закупівель як замовника:", response)
+        self.assertIn("• скарги/моніторинги: 2", response)
+        self.assertNotIn("Негативні факти серед перевірених:", response)
+
+    def test_detailed_prozorro_block_distinguishes_search_matches_from_stats(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroAnalysis,
+            ProzorroProcurement,
+            ProzorroSearchSummary,
+            ProzorroStats,
+        )
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="39582749",
+            company_data=CompanyData(short_name="ТОВ «ЗАКАРПАТГАЗ ЗБУТ»", edrpou="39582749", status="зареєстровано"),
+            prozorro_analysis=ProzorroAnalysis(
+                status="found",
+                search_summary=ProzorroSearchSummary(
+                    total_count=185,
+                    checked_count=50,
+                    detail_checked_count=50,
+                    confirmed_participation_count=3,
+                    items=[
+                        {"tenderID": "UA-1", "participation_confirmed": True},
+                        {"tenderID": "UA-2", "participation_confirmed": True},
+                        {"tenderID": "UA-3", "participation_confirmed": True},
+                    ],
+                ),
+                stats=ProzorroStats(
+                    procurements_count=1,
+                    participations_count=1,
+                    wins_count=0,
+                    contracts_count=1,
+                    terminated_contracts_count=1,
+                ),
+                procurements=[
+                    ProzorroProcurement(
+                        procurement_id="UA-2022-09-06-011139-a",
+                        participated=True,
+                        has_contract=True,
+                        contract_terminated=True,
+                    )
+                ],
+            ),
+        )
+
+        response = build_edrpou_response("39582749", result)
+        lines = response.splitlines()
+
+        self.assertIn("Підтверджено закупівель із компанією: 3.", response)
+        self.assertIn("Участей у деталізованій статистиці: 1", response)
+        self.assertNotIn("Ролі:", response)
+        self.assertIn(
+            "Примітка: кількість підтверджених закупівель і деталізована статистика можуть відрізнятися.",
+            response,
+        )
+        self.assertNotIn("Підтверджено участь компанії серед перевірених: 3.", response)
+        self.assertNotIn("Підтверджено збігів компанії у пошуку серед перевірених: 3.", response)
+        self.assertNotIn("Участей: 1", lines)
 
     def test_found_company_response_uses_fallback_for_source_error_prozorro(self):
         from app.bot import build_edrpou_response
@@ -421,16 +1809,94 @@ class BotResponseTests(unittest.TestCase):
         self.assertIn("ЄДРПОУ: 12345678", response)
         self.assertIn("Статус: Зареєстровано", response)
         self.assertIn("ПДВ-статус: Платник ПДВ", response)
-        self.assertIn("Тендери: учасник 2 закупівель", response)
+        self.assertIn("Тендери за відкритими джерелами: 2", response)
         self.assertIn("✅ Компанія зареєстрована та працює тривалий час.", response)
         self.assertIn("Фінансові дані:", response)
         self.assertIn("Дохід (2024): 1 000 000 грн", response)
-        self.assertIn("Є судові згадки: 3.", response)
+        self.assertIn("Судові документи: 3. Потрібна ручна перевірка змісту справ.", response)
         self.assertNotIn("Додаткові сигнали Clarity:", response)
         self.assertIn("Ознак банкрутства або припинення", response)
         self.assertIn("Податковий борг та борг ЄСВ", response)
         self.assertIn("Виконавчі провадження: 1", response)
         self.assertIn("Джерела: Opendatabot, Clarity", response)
+
+    def test_compact_report_hides_masked_fields_and_moves_risk_to_end(self):
+        from app.bot import format_found_company
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, CourtData, FinancialData, FinancialYearData, RiskInput
+
+        contacts_summary = {
+            "website": {"value": "****.*************.****", "confidence": "high", "sources": ["youcontrol"], "evidence": []},
+            "phone": {"value": "+380322255437", "confidence": "high", "sources": ["youcontrol"], "evidence": []},
+            "email": {"value": "*****@*************.****", "confidence": "high", "sources": ["youcontrol"], "evidence": []},
+            "source_statuses": {"youcontrol": "found"},
+        }
+        decisions = [
+            {
+                "document_type": "Ухвала",
+                "decision_date": f"0{index}.06.2026",
+                "case_number": f"916/110{index}/26",
+                "risk_summary": f"Документ {index} потребує ручної перевірки.",
+                "url": f"https://court.example/doc-{index}" if index == 1 else None,
+            }
+            for index in range(1, 7)
+        ]
+
+        response = format_found_company(
+            CompanyLookupResult(
+                status="found",
+                edrpou="12345678",
+                company_data=CompanyData(
+                    short_name='ТОВ "Тест"',
+                    edrpou="12345678",
+                    status="Зареєстровано",
+                    tenders_count=401,
+                    tenders_text="401 тендер",
+                ),
+                financial_data=FinancialData(
+                    years={"2025": FinancialYearData(revenue_uah=1250000, net_profit_uah=110000)}
+                ),
+                court_data=CourtData(has_court_mentions=True, court_mentions_count=123, decisions=decisions),
+                risk_input=RiskInput(has_court_mentions=True, court_mentions_count=123),
+            ),
+            contacts_summary=contacts_summary,
+            domain_reputation_data={
+                "source": "domain_reputation",
+                "checked": True,
+                "found": False,
+                "url": "https://example.ua",
+                "risk_flags": ["website_unavailable"],
+                "error": "website_unavailable",
+            },
+        )
+
+        self.assertIn("Тендери за відкритими джерелами: 401", response)
+        self.assertNotIn("Тендери: 401 тендер", response)
+        self.assertIn("Контакти:", response)
+        self.assertIn("☎️ Телефон: +380322255437", response)
+        self.assertNotIn("****.*************.****", response)
+        self.assertNotIn("*****@*************.****", response)
+        self.assertIn("Фінансові дані:", response)
+        self.assertIn("Дохід (2025): 1 250 000 грн", response)
+        self.assertNotIn("Доступність фінансових даних", response)
+        self.assertIn("Судові документи:", response)
+        self.assertIn("Знайдено судових документів: 123.", response)
+        self.assertIn("Показано деталізованих документів: 3 з 123.", response)
+        self.assertIn("1. Ухвала від 01.06.2026, справа №916/1101/26", response)
+        self.assertIn("   Посилання: https://court.example/doc-1", response)
+        self.assertNotIn("   Коротко:", response)
+        self.assertIn("3. Ухвала від 03.06.2026, справа №916/1103/26", response)
+        self.assertNotIn("916/1104/26", response)
+        self.assertNotIn("916/1105/26", response)
+        self.assertNotIn("916/1106/26", response)
+        self.assertNotIn("   Посилання: None", response)
+        self.assertIn("⚠️ Судові документи: 123. Потрібна ручна перевірка змісту справ.", response)
+        self.assertIn("⚠️ Сайт не вдалося перевірити автоматично. Це не є доказом ризику, але потребує ручної перевірки.", response)
+        self.assertNotIn("Рекомендація: перед передоплатою", response)
+        self.assertLess(response.index("Судові документи:"), response.index("Причини оцінки:"))
+        self.assertLess(response.index("Причини оцінки:"), response.index("Загальний ризик:"))
+        self.assertLess(response.index("Загальний ризик:"), response.index("Джерела:"))
+        self.assertIn("Судові джерела", response)
+        self.assertNotIn("перевірка сайту", response)
 
     def test_financial_block_shows_equity_capital_growth(self):
         from app.bot import build_edrpou_response
@@ -511,10 +1977,10 @@ class BotResponseTests(unittest.TestCase):
             "ЄДРПОУ:",
             "Загальний ризик:",
             "Причини оцінки:",
-            "Рекомендація: перед передоплатою",
             "Джерела:",
         ):
             self.assertIn(section, response)
+        self.assertNotIn("Рекомендація: перед передоплатою", response)
         self.assertNotIn("Простими словами:", response)
         self.assertNotIn('{"', response)
         self.assertNotIn('"sources"', response)
@@ -716,10 +2182,10 @@ class BotResponseTests(unittest.TestCase):
         )
 
         self.assertIn("Причини оцінки:", response)
-        self.assertIn("високий — 90/100", response)
+        self.assertIn("критичний — 90/100", response)
         self.assertIn("Знайдено записи, пов'язані з банкрутством", response)
         self.assertNotIn("шахрай", response.lower())
-        self.assertIn("не рекомендується робити передоплату без додаткової перевірки", response)
+        self.assertNotIn("Рекомендація: перед передоплатою", response)
         self.assertNotIn("Критичних ознак у базовій інформаційній перевірці не виявлено", response)
 
     def test_medium_risk_flags_make_recommendation_more_careful(self):
@@ -748,7 +2214,7 @@ class BotResponseTests(unittest.TestCase):
             ),
         )
 
-        self.assertIn("потребує додаткової перевірки перед оплатою", response)
+        self.assertNotIn("Рекомендація: перед передоплатою", response)
         self.assertNotIn("Критичних ознак у базовій інформаційній перевірці не виявлено", response)
 
     def test_clarity_tax_debt_amount_is_shown_and_not_reported_as_absent(self):
@@ -787,7 +2253,7 @@ class BotResponseTests(unittest.TestCase):
             ),
         )
 
-        reason_block = response.split("Причини оцінки:", 1)[1].split("Рекомендація:", 1)[0]
+        reason_block = response.split("Причини оцінки:", 1)[1].split("Загальний ризик:", 1)[0]
         self.assertIn("Clarity показує податковий борг: 414 839 394.24 грн станом на 28.01.2022", reason_block)
         self.assertIn("може бути історичний запис", reason_block)
         self.assertNotIn("Податковий борг та борг ЄСВ у доступних даних не виявлено.", reason_block)
@@ -825,17 +2291,62 @@ class BotResponseTests(unittest.TestCase):
         enriched = with_source_diagnostics(result, clarity_data)
         response = build_edrpou_response("44037141", result, clarity_data)
 
-        reason_block = response.split("Причини оцінки:", 1)[1].split("Рекомендація:", 1)[0]
+        reason_block = response.split("Причини оцінки:", 1)[1].split("Загальний ризик:", 1)[0]
         risk_codes = [reason["type"] for reason in enriched.risk_summary.reasons]
         self.assertIn("tax_debt_found", risk_codes)
         self.assertIn("tax_debt_source_mismatch", risk_codes)
         self.assertIn("opendatabot", next(reason for reason in enriched.risk_summary.reasons if reason["type"] == "tax_debt_found")["sources"])
         self.assertIn("Opendatabot показує, що ДПС стягує з компанії 1 податковий борг.", reason_block)
         self.assertIn("Виявлено значну кількість виконавчих проваджень", reason_block)
-        self.assertIn("Є значна кількість судових згадок", reason_block)
+        self.assertIn("Судові документи: 30. Потрібна ручна перевірка змісту справ.", reason_block)
         self.assertIn("Статутний капітал невеликий: 1 000 грн.", reason_block)
         self.assertNotIn("Податковий борг та борг ЄСВ у доступних даних не виявлено.", reason_block)
         self.assertGreaterEqual(enriched.risk_summary.score, 60)
+
+    def test_large_historical_tax_debt_enforcement_and_court_mentions_do_not_make_100(self):
+        from app.bot import build_edrpou_response, with_source_diagnostics
+        from app.models.clarity import ClarityData, ClaritySignals, ClarityTax
+        from app.services.opendatabot_lookup import parse_company_page
+
+        html = """
+        <html><body><main>
+          <p>Код ЄДРПОУ</p><h1>39388266</h1>
+          <h2>ДП «ДЕРЖАВНА ВУГІЛЬНА КОМПАНІЯ»</h2>
+          <p>Статус</p><p>Зареєстровано</p>
+          <p>Повна назва</p><p>ДЕРЖАВНЕ ПІДПРИЄМСТВО «ДЕРЖАВНА ВУГІЛЬНА КОМПАНІЯ»</p>
+          <p>Дата заснування</p><p>10.09.2014</p>
+          <p>Адреса</p><p>01030, Україна, місто Київ</p>
+          <p>Директор</p><p>Слюсар Сергій Анатолійович</p>
+          <p>Статутний капітал</p><p>2 000 ₴</p>
+          <p>Основний вид діяльності</p><p>46.71 Оптова торгівля твердим, рідким, газоподібним паливом і подібними продуктами</p>
+          <p>Державна податкова служба стягує з компанії 1 податковий борг</p>
+          <p>Судовий реєстр</p><p>30 рішень</p>
+        </main></body></html>
+        """
+        result = parse_company_page(html, "39388266")
+        clarity_data = ClarityData(
+            source_url="https://clarity-project.info/edr/39388266",
+            status="found",
+            edrpou="39388266",
+            tax=ClarityTax(
+                tax_debt=True,
+                esv_debt=False,
+                tax_debt_amount_uah=414839394.24,
+                tax_debt_as_of="28.01.2022",
+            ),
+            signals=ClaritySignals(
+                bankruptcy_count=0,
+                enforcement_proceedings_count=19,
+            ),
+        )
+
+        enriched = with_source_diagnostics(result, clarity_data)
+        response = build_edrpou_response("39388266", result, clarity_data)
+
+        self.assertEqual(enriched.risk_summary.score, 80)
+        self.assertEqual(enriched.risk_summary.level, "high")
+        self.assertIn("Загальний ризик: високий — 80/100", response)
+        self.assertNotIn("100/100", response)
 
     def test_tax_authority_is_not_reported_as_debtor_when_it_collects_tax_debt(self):
         from app.bot import build_edrpou_response, with_source_diagnostics
@@ -924,7 +2435,7 @@ class BotResponseTests(unittest.TestCase):
             tax_data=tax_data,
         )
 
-        reason_block = response.split("Причини оцінки:", 1)[1].split("Рекомендація:", 1)[0]
+        reason_block = response.split("Причини оцінки:", 1)[1].split("Загальний ризик:", 1)[0]
         self.assertNotIn("Податковий борг та борг ЄСВ у доступних даних не виявлено.", reason_block)
 
     def test_large_enforcement_count_increases_risk_above_old_46_score(self):
@@ -1243,7 +2754,7 @@ class BotResponseTests(unittest.TestCase):
             tax_data=tax_data,
         )
 
-        reason_block = response.split("Причини оцінки:", 1)[1].split("Рекомендація:", 1)[0]
+        reason_block = response.split("Причини оцінки:", 1)[1].split("Загальний ризик:", 1)[0]
         self.assertIn("Податковий борг та борг ЄСВ у доступних даних не виявлено.", reason_block)
 
     def test_tax_source_unavailable_is_shown_only_in_limitations(self):
@@ -1271,7 +2782,7 @@ class BotResponseTests(unittest.TestCase):
         response = build_edrpou_response("12345678", result, tax_data=tax_data)
 
         self.assertNotIn("tax_source_unavailable", [reason["type"] for reason in enriched.risk_summary.reasons])
-        reason_block = response.split("Причини оцінки:", 1)[1].split("Рекомендація:", 1)[0]
+        reason_block = response.split("Причини оцінки:", 1)[1].split("Загальний ризик:", 1)[0]
         self.assertNotIn("ДПС / податкові відкриті дані не вдалося перевірити автоматично.", response)
         self.assertNotIn("tax_source_unavailable", reason_block)
 
@@ -1381,8 +2892,8 @@ class BotResponseTests(unittest.TestCase):
             domain_reputation_data=domain_reputation_data,
         )
 
-        self.assertIn("Сайт постачальника не вдалося відкрити автоматично", response)
-        self.assertIn("Це не означає шахрайство", response)
+        self.assertIn("Сайт не вдалося перевірити автоматично", response)
+        self.assertIn("Це не є доказом ризику", response)
         self.assertNotIn("компанія шахрайська", response.lower())
 
     def test_website_not_provided_does_not_show_website_block(self):
@@ -1425,8 +2936,8 @@ class BotResponseTests(unittest.TestCase):
             ),
         )
 
-        self.assertIn("Судові згадки: багато. Потрібна ручна перевірка змісту справ.", response)
-        self.assertNotIn("Судові згадки: 250", response)
+        self.assertIn("Судові документи: 250. Потрібна ручна перевірка змісту справ.", response)
+        self.assertIn("Знайдено судових документів: 250.", response)
 
     def test_court_mentions_count_12162_is_not_shown_raw_in_normal_response(self):
         from app.bot import build_edrpou_response
@@ -1449,8 +2960,8 @@ class BotResponseTests(unittest.TestCase):
             ),
         )
 
-        self.assertIn("Судові згадки: багато. Потрібна ручна перевірка змісту справ.", response)
-        self.assertNotIn("12162", response)
+        self.assertIn("Судові документи: 12 162. Потрібна ручна перевірка змісту справ.", response)
+        self.assertIn("Знайдено судових документів: 12 162.", response)
 
     def test_court_mentions_count_alone_does_not_make_risk_critical(self):
         from app.bot import with_source_diagnostics
@@ -1476,7 +2987,7 @@ class BotResponseTests(unittest.TestCase):
         self.assertNotEqual(enriched.risk_summary.level, "critical")
         self.assertEqual(
             [reason["type"] for reason in enriched.risk_summary.reasons],
-            ["court_cases_found", "many_court_mentions_found"],
+            ["court_cases_found", "many_court_mentions_found", "very_many_court_mentions_found"],
         )
 
     def test_bankruptcy_plus_enforcement_can_make_risk_critical(self):
@@ -1504,6 +3015,32 @@ class BotResponseTests(unittest.TestCase):
         self.assertEqual(enriched.risk_summary.level, "critical")
         self.assertIn("bankruptcy_found", [flag.code for flag in enriched.risk_summary.flags])
         self.assertIn("enforcement_found", [flag.code for flag in enriched.risk_summary.flags])
+
+    def test_opendatabot_bankruptcy_flag_makes_report_high_risk(self):
+        from app.bot import build_edrpou_response, with_source_diagnostics
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, CourtData
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="25102871",
+            company_data=CompanyData(
+                short_name="ТОВ «УКРІНВЕСТ»",
+                edrpou="25102871",
+                status="припинено",
+                registration_date="27.08.1997",
+            ),
+            court_data=CourtData(risk_flags=["bankruptcy_found", "company_in_termination"]),
+        )
+
+        enriched = with_source_diagnostics(result, clarity_data=None)
+        response = build_edrpou_response("25102871", result)
+
+        risk_codes = [flag.code for flag in enriched.risk_summary.flags]
+        self.assertIn("bankruptcy_found", risk_codes)
+        self.assertEqual(enriched.risk_summary.level, "critical")
+        self.assertIn("Загальний ризик: критичний", response)
+        self.assertIn("банкрут", response.lower())
+        self.assertNotIn("✅ Ознак банкрутства або припинення", response)
 
     def test_large_enforcement_count_is_not_shown_as_raw_number_in_normal_response(self):
         from app.bot import build_edrpou_response
@@ -1554,7 +3091,7 @@ class BotResponseTests(unittest.TestCase):
         response = build_edrpou_response("12345678", result, debtors_registry_data=debtors_registry_data)
 
         self.assertNotIn("source_unavailable", [reason["type"] for reason in enriched.risk_summary.reasons])
-        reason_block = response.split("Причини оцінки:", 1)[1].split("Рекомендація:", 1)[0]
+        reason_block = response.split("Причини оцінки:", 1)[1].split("Загальний ризик:", 1)[0]
         self.assertNotIn("Обмеження перевірки:", response)
         self.assertNotIn("недоступ", reason_block.lower())
 
@@ -1583,6 +3120,35 @@ class BotResponseTests(unittest.TestCase):
 
         risk_codes = [flag.code for flag in enriched.risk_summary.flags]
         self.assertIn("company_status_mismatch", risk_codes)
+        self.assertNotIn("company_in_termination", risk_codes)
+
+    def test_conflicting_ukrposhta_status_is_shown_as_manual_review_not_termination(self):
+        from app.bot import build_edrpou_response
+        from app.models.clarity import ClarityCompany, ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        response = build_edrpou_response(
+            "21560045",
+            CompanyLookupResult(
+                status="found",
+                edrpou="21560045",
+                company_data=CompanyData(
+                    short_name="АТ «УКРПОШТА»",
+                    edrpou="21560045",
+                    status="В стані припинення",
+                ),
+            ),
+            ClarityData(
+                source_url="https://clarity-project.info/edr/21560045",
+                status="found",
+                edrpou="21560045",
+                company=ClarityCompany(status="Зареєстровано"),
+            ),
+        )
+
+        self.assertIn("Статус: потребує ручної перевірки статусу", response)
+        self.assertNotIn("Статус: В стані припинення", response)
+        self.assertNotIn("Є ознаки процедури припинення компанії.", response)
 
     def test_negative_termination_status_does_not_add_termination_risk(self):
         from app.bot import with_source_diagnostics
@@ -1604,6 +3170,73 @@ class BotResponseTests(unittest.TestCase):
         risk_codes = [flag.code for flag in enriched.risk_summary.flags]
         self.assertNotIn("company_in_termination", risk_codes)
         self.assertNotIn("company_status_mismatch", risk_codes)
+
+    def test_registered_ukrposhta_status_does_not_add_termination_risk(self):
+        from app.bot import with_source_diagnostics
+        from app.models.clarity import ClarityCompany, ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        enriched = with_source_diagnostics(
+            CompanyLookupResult(
+                status="found",
+                edrpou="21560045",
+                company_data=CompanyData(
+                    short_name="АТ «УКРПОШТА»",
+                    edrpou="21560045",
+                    status="Зареєстровано",
+                ),
+            ),
+            ClarityData(
+                source_url="https://clarity-project.info/edr/21560045",
+                status="found",
+                edrpou="21560045",
+                company=ClarityCompany(status="Зареєстровано"),
+            ),
+        )
+
+        risk_codes = [flag.code for flag in enriched.risk_summary.flags]
+        self.assertNotIn("company_in_termination", risk_codes)
+        self.assertNotIn("company_status_mismatch", risk_codes)
+
+    def test_land_use_termination_phrase_does_not_add_company_termination_risk(self):
+        from app.bot import with_source_diagnostics
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        enriched = with_source_diagnostics(
+            CompanyLookupResult(
+                status="found",
+                edrpou="12345678",
+                company_data=CompanyData(
+                    short_name="ТОВ «ПРИКЛАД»",
+                    edrpou="12345678",
+                    status="Зареєстровано; рішення про припинення права користування землею",
+                ),
+            ),
+            clarity_data=None,
+        )
+
+        risk_codes = [flag.code for flag in enriched.risk_summary.flags]
+        self.assertNotIn("company_in_termination", risk_codes)
+
+    def test_historical_reorganization_phrase_does_not_add_company_termination_risk(self):
+        from app.bot import with_source_diagnostics
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        enriched = with_source_diagnostics(
+            CompanyLookupResult(
+                status="found",
+                edrpou="12345678",
+                company_data=CompanyData(
+                    short_name="ТОВ «ПРИКЛАД»",
+                    edrpou="12345678",
+                    status="Зареєстровано; історична подія: припинення шляхом перетворення у 2017 році",
+                ),
+            ),
+            clarity_data=None,
+        )
+
+        risk_codes = [flag.code for flag in enriched.risk_summary.flags]
+        self.assertNotIn("company_in_termination", risk_codes)
 
     def test_conflicting_bankruptcy_sources_show_conflicting_data_block(self):
         from app.bot import build_edrpou_response, with_source_diagnostics
@@ -1672,7 +3305,7 @@ class BotResponseTests(unittest.TestCase):
         )
 
         self.assertIn("Причини оцінки:", response)
-        why_block = response.split("Причини оцінки:", 1)[1].split("Рекомендація:", 1)[0].lower()
+        why_block = response.split("Причини оцінки:", 1)[1].split("Загальний ризик:", 1)[0].lower()
         self.assertIn("банкрут", why_block)
         self.assertIn("припинення", why_block)
         self.assertIn("виконавч", why_block)
@@ -1815,7 +3448,7 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Додаткові сигнали Clarity:", message.answers[1])
         self.assertIn("Ознак банкрутства або припинення", message.answers[1])
         self.assertIn("Податковий борг та борг ЄСВ", message.answers[1])
-        self.assertIn("Рекомендація:", message.answers[1])
+        self.assertNotIn("Рекомендація:", message.answers[1])
         self.assertEqual(saved_results, [("12345678", 777)])
 
     async def test_valid_edrpou_runs_main_and_clarity_lookups_in_parallel(self):
@@ -1962,7 +3595,7 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
             save=lambda result, user_id: saved_results.append(result),
         )
 
-        self.assertEqual(saved_results[0].risk_summary.score, 0)
+        self.assertEqual(saved_results[0].risk_summary.score, 5)
         self.assertNotIn(
             "multiple_prozorro_terminations_found",
             [reason["type"] for reason in saved_results[0].risk_summary.reasons],
@@ -2775,7 +4408,7 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        reason_block = response.split("Причини оцінки:", 1)[1].split("Рекомендація:", 1)[0]
+        reason_block = response.split("Причини оцінки:", 1)[1].split("Загальний ризик:", 1)[0]
         self.assertNotIn("Додаткові сигнали Clarity", reason_block)
         self.assertIn("Ознак банкрутства або припинення", reason_block)
         self.assertIn("Податковий борг та борг ЄСВ", reason_block)
@@ -2826,7 +4459,7 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Телефон: +38 (0522) 39-13-94", response)
         self.assertNotIn("+380578610038", response)
 
-    def test_report_shows_at_most_two_extracted_court_decisions(self):
+    def test_report_shows_up_to_three_extracted_court_decisions_without_summary(self):
         from app.bot import format_found_company
         from app.models.company_lookup import CompanyData, CompanyLookupResult, CourtData
 
@@ -2837,36 +4470,85 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
                 company_data=CompanyData(short_name="ТОВ «ПРИКЛАД»", edrpou="12345678"),
                 court_data=CourtData(
                     has_court_mentions=True,
-                    court_mentions_count=3,
+                    court_mentions_count=9,
                     decisions=[
                         {
                             "document_type": "Ухвала",
                             "decision_date": "04.05.2026",
                             "case_number": "160/11282/25",
                             "risk_summary": "Документ виглядає як процесуальна ухвала.",
+                            "url": "https://court.example/doc-1",
                         },
                         {
                             "document_type": "Ухвала",
                             "decision_date": "05.05.2026",
                             "case_number": "160/11283/25",
                             "risk_summary": "Є ознаки спору щодо стягнення пені.",
+                            "url": "https://court.example/doc-2",
                         },
                         {
                             "document_type": "Ухвала",
                             "decision_date": "06.05.2026",
-                            "case_number": "160/11284/25",
-                            "risk_summary": "Третю ухвалу не треба показувати.",
+                            "case_number": "160/11286/25",
+                            "risk_summary": "Документ 6.",
+                            "url": "https://court.example/doc-3",
                         },
+                        *[
+                            {
+                                "document_type": "Ухвала",
+                                "decision_date": f"0{day}.05.2026",
+                                "case_number": f"160/1128{day}/25",
+                                "risk_summary": f"Документ {day}.",
+                                "url": f"https://court.example/doc-{day}",
+                            }
+                            for day in range(7, 10)
+                        ],
                     ],
                 ),
             )
         )
 
         self.assertIn("Судові документи:", response)
+        self.assertIn("Показано деталізованих документів: 3 з 9.", response)
         self.assertIn("справа №160/11282/25", response)
         self.assertIn("справа №160/11283/25", response)
-        self.assertNotIn("160/11284/25", response)
-        self.assertNotIn("Третю ухвалу не треба показувати", response)
+        self.assertIn("справа №160/11286/25", response)
+        self.assertIn("Посилання: https://court.example/doc-1", response)
+        self.assertIn("Посилання: https://court.example/doc-2", response)
+        self.assertIn("Посилання: https://court.example/doc-3", response)
+        self.assertNotIn("Коротко:", response)
+        self.assertNotIn("160/11287/25", response)
+        self.assertNotIn("160/11288/25", response)
+        self.assertNotIn("160/11289/25", response)
+
+    def test_report_explains_when_only_one_court_decision_detail_is_available(self):
+        from app.bot import format_found_company
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, CourtData
+
+        response = format_found_company(
+            CompanyLookupResult(
+                status="found",
+                edrpou="12345678",
+                company_data=CompanyData(short_name="ТОВ «ПРИКЛАД»", edrpou="12345678"),
+                court_data=CourtData(
+                    has_court_mentions=True,
+                    court_mentions_count=400,
+                    decisions=[
+                        {
+                            "document_type": "Ухвала",
+                            "decision_date": "04.06.2026",
+                            "case_number": "463/1298/23",
+                            "risk_summary": "У тексті не знайдено явних ознак встановленої відповідальності.",
+                        }
+                    ],
+                ),
+            )
+        )
+
+        self.assertIn("Знайдено судових документів: 400.", response)
+        self.assertIn("Показано деталізованих документів: 1 з 400.", response)
+        self.assertIn("1. Ухвала від 04.06.2026, справа №463/1298/23", response)
+        self.assertNotIn("2. Ухвала", response)
 
     def test_user_report_uses_compact_business_format(self):
         from app.bot import format_found_company
@@ -2937,11 +4619,11 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Фінансові дані:", response)
         self.assertIn("Статутний капітал: 104 000 грн", response)
         self.assertIn("Інші фінансові показники у доступних джерелах не знайдено.", response)
-        self.assertIn("Загальний ризик: низький — 1/100", response)
+        self.assertIn("Загальний ризик: низький — 13/100", response)
         self.assertIn("Причини оцінки:", response)
         self.assertIn("✅ Компанія зареєстрована та працює тривалий час.", response)
         self.assertIn("✅ Контактні дані підтверджені відкритими джерелами.", response)
-        self.assertIn("⚠️ Є судові згадки: 2. Потрібно оцінювати зміст справ, а не сам факт наявності судових документів.", response)
+        self.assertIn("⚠️ Судові документи: 2. Потрібна ручна перевірка змісту справ.", response)
         self.assertIn("Судові документи:", response)
         self.assertNotIn("Рівень довіри:", response)
         self.assertNotIn("Підстава:", response)
@@ -3050,7 +4732,7 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        self.assertIn("Судові згадки: Opendatabot — 11, YouControl — 4", response)
+        self.assertIn("Судові документи: Opendatabot — 11, YouControl — 4", response)
         self.assertNotIn("Є судові згадки: 11.", response)
 
     def test_enforcement_count_is_not_duplicated_by_generic_reason(self):
