@@ -260,6 +260,8 @@ def format_found_company(
     if financial_lines:
         lines.extend(["", "Фінансові дані:", *financial_lines])
     prozorro_source_included = is_reportable_prozorro_analysis(lookup_result.prozorro_analysis)
+    prozorro_report_mode = get_prozorro_report_mode(lookup_result)
+    log_prozorro_report_mode(prozorro_report_mode, lookup_result.prozorro_analysis, prozorro_source_included)
     prozorro_lines = build_prozorro_section_lines(lookup_result)
     if prozorro_lines:
         lines.extend(["", "Prozorro:", *prozorro_lines])
@@ -355,7 +357,36 @@ def format_sources(
 
 
 def is_reportable_prozorro_analysis(prozorro_analysis: ProzorroAnalysis | None) -> bool:
-    return bool(prozorro_analysis and prozorro_analysis.status in {"found", "partial", "source_error"})
+    return bool(
+        prozorro_analysis
+        and prozorro_analysis.status in {"found", "partial"}
+        and prozorro_records_count(prozorro_analysis) > 0
+    )
+
+
+def prozorro_records_count(prozorro_analysis: ProzorroAnalysis | None) -> int:
+    return len(prozorro_analysis.procurements) if prozorro_analysis else 0
+
+
+def get_prozorro_report_mode(lookup_result: CompanyLookupResult) -> str:
+    if is_reportable_prozorro_analysis(lookup_result.prozorro_analysis):
+        return "detailed"
+    status = str(lookup_result.prozorro_analysis.status) if lookup_result.prozorro_analysis else ""
+    if status in {"source_error", "unavailable"}:
+        return "source_error"
+    if build_prozorro_tender_fallback_lines(lookup_result.company_data):
+        return "fallback"
+    return "fallback" if status == "not_found" else "none"
+
+
+def log_prozorro_report_mode(
+    mode: str,
+    prozorro_analysis: ProzorroAnalysis | None,
+    source_added: bool,
+) -> None:
+    logging.info("Prozorro report mode: %s", mode)
+    logging.info("Prozorro records_count=%s", prozorro_records_count(prozorro_analysis))
+    logging.info("Prozorro source added=%s", str(source_added).lower())
 
 
 def build_prozorro_section_lines(lookup_result: CompanyLookupResult) -> list[str]:
@@ -372,7 +403,7 @@ def build_prozorro_tender_fallback_lines(company: CompanyData | None) -> list[st
         return []
     return [
         f"За відкритими даними знайдено участь у тендерах: {tenders_text}.",
-        "Детальна історія закупівель Prozorro ще не підключена або не передана.",
+        "Детальна історія закупівель Prozorro тимчасово недоступна або не знайдена live-пошуком.",
         "Примітка: сам факт участі у тендерах не є ризиком. Score не підвищено.",
     ]
 

@@ -149,7 +149,13 @@ class BotResponseTests(unittest.TestCase):
 
     def test_found_company_response_shows_prozorro_block_when_analysis_exists(self):
         from app.bot import build_edrpou_response
-        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroAnalysis,
+            ProzorroProcurement,
+            ProzorroStats,
+        )
 
         result = CompanyLookupResult(
             status="found",
@@ -168,6 +174,7 @@ class BotResponseTests(unittest.TestCase):
                     win_rate_percent=0.0,
                     last_participation_date="2025-03-10",
                 ),
+                procurements=[ProzorroProcurement(procurement_id="UA-DETAIL-1", participated=True)],
                 info_notes=[
                     "Сам факт участі не є ризиком.",
                     "Перемог у Prozorro не знайдено; score не підвищено.",
@@ -222,9 +229,89 @@ class BotResponseTests(unittest.TestCase):
 
         self.assertIn("Prozorro:", response)
         self.assertIn("За відкритими даними знайдено участь у тендерах: 7 тендерів.", response)
-        self.assertIn("Детальна історія закупівель Prozorro ще не підключена або не передана.", response)
+        self.assertIn("Детальна історія закупівель Prozorro тимчасово недоступна або не знайдена live-пошуком.", response)
         self.assertIn("Score не підвищено.", response)
         self.assertIn("Джерело: Opendatabot", response)
+        self.assertNotIn("Джерела: Opendatabot, Prozorro", response)
+
+    def test_found_company_response_uses_fallback_for_source_error_prozorro(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(
+                short_name='ТОВ "Тест"',
+                edrpou="12345678",
+                tenders_count=7,
+                tenders_text="7 тендерів",
+            ),
+            prozorro_analysis=ProzorroAnalysis(status="source_error", error="live_timeout"),
+        )
+
+        with self.assertLogs(level="INFO") as logs:
+            response = build_edrpou_response("12345678", result)
+
+        self.assertIn("Prozorro:", response)
+        self.assertIn("За відкритими даними знайдено участь у тендерах: 7 тендерів.", response)
+        self.assertIn("Детальна історія закупівель Prozorro тимчасово недоступна або не знайдена live-пошуком.", response)
+        self.assertNotIn("Закупівель: 0", response)
+        self.assertNotIn("Участей: 0", response)
+        self.assertNotIn("Джерела: Opendatabot, Prozorro", response)
+        self.assertIn("Prozorro report mode: source_error", "\n".join(logs.output))
+        self.assertIn("Prozorro records_count=0", "\n".join(logs.output))
+        self.assertIn("Prozorro source added=false", "\n".join(logs.output))
+
+    def test_found_company_response_uses_fallback_for_unavailable_prozorro(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(
+                short_name='ТОВ "Тест"',
+                edrpou="12345678",
+                tenders_count=7,
+                tenders_text="7 тендерів",
+            ),
+            prozorro_analysis=ProzorroAnalysis(status="unavailable"),
+        )
+
+        response = build_edrpou_response("12345678", result)
+
+        self.assertIn("Prozorro:", response)
+        self.assertIn("Детальна історія закупівель Prozorro тимчасово недоступна або не знайдена live-пошуком.", response)
+        self.assertNotIn("Закупівель: 0", response)
+        self.assertNotIn("Джерела: Opendatabot, Prozorro", response)
+
+    def test_found_company_response_uses_fallback_when_prozorro_has_no_records(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroAnalysis,
+            ProzorroStats,
+        )
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(
+                short_name='ТОВ "Тест"',
+                edrpou="12345678",
+                tenders_count=7,
+                tenders_text="7 тендерів",
+            ),
+            prozorro_analysis=ProzorroAnalysis(status="found", stats=ProzorroStats(procurements_count=0)),
+        )
+
+        response = build_edrpou_response("12345678", result)
+
+        self.assertIn("Prozorro:", response)
+        self.assertIn("Детальна історія закупівель Prozorro тимчасово недоступна або не знайдена live-пошуком.", response)
+        self.assertNotIn("Закупівель: 0", response)
         self.assertNotIn("Джерела: Opendatabot, Prozorro", response)
 
     def test_recommendation_text_changes_by_risk_level(self):
@@ -1775,7 +1862,13 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_edrpou_handler_shows_prozorro_from_injected_lookup(self):
         from app.bot import edrpou_handler
         from app.models.clarity import ClarityData
-        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroAnalysis,
+            ProzorroProcurement,
+            ProzorroStats,
+        )
 
         message = FakeMessage("12345678", user_id=777)
         saved_results: list[CompanyLookupResult] = []
@@ -1801,6 +1894,7 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
                     terminated_contracts_count=0,
                     last_participation_date="2026-01-10",
                 ),
+                procurements=[ProzorroProcurement(procurement_id="UA-HANDLER-1", participated=True)],
                 summary="Prozorro: участей 2, перемог 1, договорів 1, розірвань 0.",
                 info_notes=["Сам факт участі не є ризиком."],
             )

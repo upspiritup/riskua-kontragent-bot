@@ -144,7 +144,7 @@ class ProzorroStats(BaseModel):
 
 class ProzorroAnalysis(BaseModel):
     source: str = "prozorro_analysis"
-    status: Literal["found", "not_found", "partial", "source_error"] = "not_found"
+    status: Literal["found", "not_found", "partial", "source_error", "unavailable"] = "not_found"
     stats: ProzorroStats = Field(default_factory=ProzorroStats)
     procurements: list[ProzorroProcurement] = Field(default_factory=list)
     risk_flags: list[dict[str, Any]] = Field(default_factory=list)
