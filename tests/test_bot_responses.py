@@ -341,8 +341,13 @@ class BotResponseTests(unittest.TestCase):
             "Допомагаю швидко перевірити компанію за ЄДРПОУ перед оплатою, договором або співпрацею.\n\n"
             "Надішліть код ЄДРПОУ — я покажу базові дані, можливі ризики та коротку рекомендацію.\n\n"
             "Приклад: 12345678\n\n"
-            "⏳ Аналіз може зайняти до 30 секунд.",
+            "⏳ Аналіз може зайняти до 1 хвилини.",
         )
+
+    def test_default_analysis_timeout_is_one_minute(self):
+        from app.bot import ANALYSIS_TIMEOUT_SECONDS
+
+        self.assertEqual(ANALYSIS_TIMEOUT_SECONDS, 60.0)
 
     def test_invalid_edrpou_returns_format_hint(self):
         from app.bot import INVALID_EDRPOU_TEXT, build_edrpou_response
@@ -1730,7 +1735,7 @@ class BotResponseTests(unittest.TestCase):
             "1. Надішліть ЄДРПОУ компанії у форматі 8 цифр.\n"
             "2. Дочекайтесь завершення аналізу.\n"
             "3. Отримайте базові дані, ризикові ознаки та рекомендацію.\n\n"
-            "⏳ Аналіз може зайняти до 30 секунд.",
+            "⏳ Аналіз може зайняти до 1 хвилини.",
         )
 
 
@@ -1996,6 +2001,46 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.prozorro_analysis.status, "found")
         self.assertEqual(result.prozorro_analysis.stats.procurements_count, 3)
+
+    async def test_run_source_lookups_uses_one_shared_timeout_budget(self):
+        from app.bot import run_source_lookups
+        from app.models.clarity import ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis
+
+        asyncio_module = __import__("asyncio")
+
+        def found_lookup(edrpou: str) -> CompanyLookupResult:
+            return CompanyLookupResult(
+                status="found",
+                edrpou=edrpou,
+                company_data=CompanyData(short_name='ТОВ "ПРИКЛАД"', edrpou=edrpou),
+            )
+
+        def found_clarity_lookup(edrpou: str) -> ClarityData:
+            return ClarityData(source_url=f"https://clarity-project.info/edr/{edrpou}", status="found", edrpou=edrpou)
+
+        async def slow_contacts_lookup(edrpou: str, company_context: dict | None = None) -> dict:
+            await asyncio_module.sleep(0.2)
+            return {
+                "website": {"value": "https://slow.example", "confidence": "high", "sources": [], "evidence": []},
+                "source_statuses": {"test": "found"},
+            }
+
+        *_, contacts_summary = await run_source_lookups(
+            "12345678",
+            found_lookup,
+            found_clarity_lookup,
+            no_youcontrol_lookup,
+            no_debtors_lookup,
+            no_tax_lookup,
+            no_domain_reputation_lookup,
+            slow_contacts_lookup,
+            analysis_timeout=0.05,
+            prozorro_lookup=lambda edrpou: ProzorroAnalysis(status="not_found"),
+        )
+
+        self.assertIsNone(contacts_summary["website"]["value"])
+        self.assertIn("checked_sources", contacts_summary)
 
     async def test_edrpou_handler_preserves_positional_save_argument(self):
         from app.bot import edrpou_handler

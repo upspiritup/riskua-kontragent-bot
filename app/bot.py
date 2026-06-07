@@ -59,7 +59,7 @@ START_TEXT = (
     "Допомагаю швидко перевірити компанію за ЄДРПОУ перед оплатою, договором або співпрацею.\n\n"
     "Надішліть код ЄДРПОУ — я покажу базові дані, можливі ризики та коротку рекомендацію.\n\n"
     "Приклад: 12345678\n\n"
-    "⏳ Аналіз може зайняти до 30 секунд."
+    "⏳ Аналіз може зайняти до 1 хвилини."
 )
 
 HELP_TEXT = (
@@ -93,7 +93,7 @@ INFO_TEXT = (
     "1. Надішліть ЄДРПОУ компанії у форматі 8 цифр.\n"
     "2. Дочекайтесь завершення аналізу.\n"
     "3. Отримайте базові дані, ризикові ознаки та рекомендацію.\n\n"
-    "⏳ Аналіз може зайняти до 30 секунд."
+    "⏳ Аналіз може зайняти до 1 хвилини."
 )
 
 STOP_TEXT = "Діалог зупинено. Щоб повернути кнопки та почати знову, натисніть /start."
@@ -102,10 +102,10 @@ INVALID_EDRPOU_TEXT = "Будь ласка, введіть ЄДРПОУ у фо�
 NOT_FOUND_TEXT = "ЄДРПОУ має правильний формат, але компанію з таким кодом не знайдено у джерелі перевірки."
 SOURCE_ERROR_TEXT = "Не вдалося отримати дані з джерела. Спробуйте пізніше або перевірте ЄДРПОУ вручну."
 
-EDRPOU_SEARCH_TEXT = "🔎 Шукаю дані та формую коротку рекомендацію. Це може зайняти до 30 секунд..."
+EDRPOU_SEARCH_TEXT = "🔎 Шукаю дані та формую коротку рекомендацію. Це може зайняти до 1 хвилини..."
 STOP_BUTTON_TEXT = "🛑 Зупинити"
 INFO_BUTTON_TEXT = "ℹ️ Як працює"
-ANALYSIS_TIMEOUT_SECONDS = 28.0
+ANALYSIS_TIMEOUT_SECONDS = 60.0
 SHOW_TECHNICAL_LIMITATIONS = False
 YOUCONTROL_RISK_DEFINITIONS = {
     "company_not_found": (
@@ -1405,6 +1405,7 @@ async def run_source_lookups(
     analysis_timeout: float = ANALYSIS_TIMEOUT_SECONDS,
     prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
 ) -> tuple[CompanyLookupResult, ClarityData | None, dict | None, dict | None, dict | None, dict | None, dict | None]:
+    analysis_deadline = asyncio.get_running_loop().time() + max(0.0, analysis_timeout)
     lookup_task = asyncio.create_task(asyncio.to_thread(lookup, edrpou))
     clarity_task = asyncio.create_task(asyncio.to_thread(clarity_lookup, edrpou))
     youcontrol_task = asyncio.create_task(asyncio.to_thread(youcontrol_lookup, edrpou))
@@ -1412,7 +1413,7 @@ async def run_source_lookups(
     tax_task = asyncio.create_task(asyncio.to_thread(tax_lookup, edrpou))
     prozorro_task = asyncio.create_task(asyncio.to_thread(prozorro_lookup, edrpou))
     first_batch_tasks = {lookup_task, clarity_task, youcontrol_task, debtors_task, tax_task, prozorro_task}
-    await asyncio.wait(first_batch_tasks, timeout=analysis_timeout)
+    await asyncio.wait(first_batch_tasks, timeout=max(0.0, analysis_timeout))
 
     result = completed_lookup_result(lookup_task, edrpou)
     clarity_data = completed_clarity_result(clarity_task, edrpou)
@@ -1432,7 +1433,9 @@ async def run_source_lookups(
         asyncio.to_thread(domain_reputation_lookup, selected_website_url, company_context)
     )
     contacts_task = asyncio.create_task(run_contacts_lookup(contacts_lookup, edrpou, company_context))
-    await asyncio.wait({domain_task, contacts_task}, timeout=min(15.0, max(1.0, analysis_timeout)))
+    remaining_timeout = max(0.0, analysis_deadline - asyncio.get_running_loop().time())
+    if remaining_timeout > 0:
+        await asyncio.wait({domain_task, contacts_task}, timeout=remaining_timeout)
     domain_reputation_data = completed_domain_reputation_result(domain_task, selected_website_url)
     contacts_summary = completed_contacts_summary_result(contacts_task, edrpou)
     if not domain_task.done():
