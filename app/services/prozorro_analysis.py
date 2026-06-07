@@ -497,10 +497,11 @@ def calculate_stats(procurements: list[ProzorroProcurement]) -> ProzorroStats:
     buyer_values: dict[str, float] = {}
     total_contract_value = 0.0
     for item in contracts:
-        if item.buyer_edrpou:
-            buyer_counts[item.buyer_edrpou] = buyer_counts.get(item.buyer_edrpou, 0) + 1
+        buyer_key = buyer_concentration_key(item)
+        if buyer_key:
+            buyer_counts[buyer_key] = buyer_counts.get(buyer_key, 0) + 1
             if item.contract_value_uah is not None:
-                buyer_values[item.buyer_edrpou] = buyer_values.get(item.buyer_edrpou, 0.0) + item.contract_value_uah
+                buyer_values[buyer_key] = buyer_values.get(buyer_key, 0.0) + item.contract_value_uah
         if item.contract_value_uah is not None:
             total_contract_value += item.contract_value_uah
 
@@ -547,6 +548,16 @@ def build_summary(stats: ProzorroStats) -> str:
         f"Prozorro: участей {stats.participations_count}, перемог {stats.wins_count}, "
         f"договорів {stats.contracts_count}, розірвань {stats.terminated_contracts_count}."
     )
+
+
+def buyer_concentration_key(item: ProzorroProcurement) -> str | None:
+    if item.buyer_edrpou:
+        return f"edrpou:{item.buyer_edrpou.strip()}"
+    if item.buyer_name:
+        normalized_name = " ".join(item.buyer_name.casefold().split())
+        if normalized_name:
+            return f"name:{normalized_name}"
+    return None
 
 
 def first_text(item: dict[str, Any], *keys: str) -> str | None:

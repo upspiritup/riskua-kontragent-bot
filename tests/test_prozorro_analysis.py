@@ -321,6 +321,26 @@ class ProzorroAnalysisTests(unittest.TestCase):
         self.assertIn("single_buyer_concentration", self.flag_types(analysis))
         self.assertTrue(any("одним замовником" in note for note in analysis.info_notes))
 
+    def test_single_buyer_concentration_falls_back_to_buyer_name(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        analysis = analyze_prozorro_data(
+            [
+                {
+                    "id": f"UA-BUYER-NAME-{index}",
+                    "participated": True,
+                    "won": True,
+                    "has_contract": True,
+                    "buyer_name": "Департамент охорони здоров'я",
+                    "contract_value": 100000,
+                }
+                for index in range(5)
+            ]
+        )
+
+        self.assertIn("single_buyer_concentration", self.flag_types(analysis))
+        self.assertTrue(any("одним замовником" in note for note in analysis.info_notes))
+
     def test_low_competition_wins_adds_risk(self):
         from app.services.prozorro_analysis import analyze_prozorro_data
 
