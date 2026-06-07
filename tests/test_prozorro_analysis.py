@@ -105,6 +105,25 @@ class ProzorroAnalysisTests(unittest.TestCase):
 
         self.assertFlagTypes(analysis, ["prozorro_termination_found"])
 
+    def test_single_terminated_contract_does_not_add_multiple_terminations_risk(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        analysis = analyze_prozorro_data(
+            [
+                {
+                    "id": "UA-TERM-1",
+                    "participated": True,
+                    "won": True,
+                    "has_contract": True,
+                    "contract_terminated": True,
+                    "termination_reason": "Contract terminated by agreement.",
+                },
+            ]
+        )
+
+        self.assertIn("prozorro_termination_found", self.flag_types(analysis))
+        self.assertNotIn("multiple_prozorro_terminations_found", self.flag_types(analysis))
+
     def test_terminated_contract_without_has_contract_adds_termination_risk(self):
         from app.services.prozorro_analysis import analyze_prozorro_data
 
@@ -252,6 +271,15 @@ class ProzorroAnalysisTests(unittest.TestCase):
 
         self.assertIn("frequent_prozorro_disqualifications", self.flag_types(count_analysis))
         self.assertIn("frequent_prozorro_disqualifications", self.flag_types(rate_analysis))
+
+    def test_single_disqualification_does_not_add_frequent_disqualifications_risk(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        analysis = analyze_prozorro_data(
+            [{"id": "UA-DQ-1", "participated": True, "disqualified": True}]
+        )
+
+        self.assertNotIn("frequent_prozorro_disqualifications", self.flag_types(analysis))
 
     def test_disqualification_reasons_map_to_risk_flags(self):
         from app.services.prozorro_analysis import analyze_prozorro_data

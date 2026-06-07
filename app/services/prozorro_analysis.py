@@ -167,9 +167,7 @@ def build_risk_flags(
                 "contract_terminated",
             )
         )
-    if stats.terminated_contracts_count >= 2 or (
-        stats.termination_rate_percent is not None and stats.termination_rate_percent >= 30
-    ):
+    if stats.terminated_contracts_count >= 2:
         flags.append(
             risk_flag(
                 "multiple_prozorro_terminations_found",
@@ -185,7 +183,9 @@ def build_risk_flags(
             flags.append(risk_flag("contract_nonperformance_case", reason, marker))
 
     if stats.disqualifications_count >= 3 or (
-        stats.disqualification_rate_percent is not None and stats.disqualification_rate_percent > 50
+        stats.disqualifications_count >= 2
+        and stats.disqualification_rate_percent is not None
+        and stats.disqualification_rate_percent > 50
     ):
         flags.append(
             risk_flag(

@@ -89,6 +89,52 @@ class BotResponseTests(unittest.TestCase):
         self.assertEqual(summary.reasons[0]["type"], "prozorro_termination_found")
         self.assertEqual(summary.reasons[0]["sources"], ["prozorro_analysis"])
 
+    def test_build_risk_summary_ignores_source_error_prozorro_flags(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            prozorro_analysis=ProzorroAnalysis(
+                status="source_error",
+                risk_flags=[
+                    {
+                        "type": "multiple_prozorro_terminations_found",
+                        "source": "prozorro_analysis",
+                    }
+                ],
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+
+        self.assertEqual(summary.score, 0)
+        self.assertNotIn("multiple_prozorro_terminations_found", [reason["type"] for reason in summary.reasons])
+
+    def test_build_risk_summary_ignores_not_found_prozorro_flags(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            prozorro_analysis=ProzorroAnalysis(
+                status="not_found",
+                risk_flags=[
+                    {
+                        "type": "multiple_prozorro_terminations_found",
+                        "source": "prozorro_analysis",
+                    }
+                ],
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+
+        self.assertEqual(summary.score, 0)
+        self.assertNotIn("multiple_prozorro_terminations_found", [reason["type"] for reason in summary.reasons])
+
     def test_build_sources_snapshot_includes_prozorro_analysis(self):
         from app.bot import build_sources_snapshot
         from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis, ProzorroStats

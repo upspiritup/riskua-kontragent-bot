@@ -1849,7 +1849,7 @@ def collect_source_risk_flags(
         ):
             flags.append({"type": "website_source_unavailable", "source": "domain_reputation"})
     prozorro_analysis = result.prozorro_analysis
-    if prozorro_analysis:
+    if prozorro_analysis and prozorro_analysis.status in {"found", "partial"}:
         for flag in prozorro_analysis.risk_flags:
             prepared_flag = dict(flag)
             prepared_flag.setdefault("source", "prozorro_analysis")
