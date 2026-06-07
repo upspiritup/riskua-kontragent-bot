@@ -259,9 +259,10 @@ def format_found_company(
     financial_lines = build_financial_lines(lookup_result, clarity_data)
     if financial_lines:
         lines.extend(["", "Фінансові дані:", *financial_lines])
-    prozorro_included = is_reportable_prozorro_analysis(lookup_result.prozorro_analysis)
-    if prozorro_included:
-        lines.extend(["", "Prozorro:", *build_prozorro_lines(lookup_result.prozorro_analysis)])
+    prozorro_source_included = is_reportable_prozorro_analysis(lookup_result.prozorro_analysis)
+    prozorro_lines = build_prozorro_section_lines(lookup_result)
+    if prozorro_lines:
+        lines.extend(["", "Prozorro:", *prozorro_lines])
     assessment_reason_lines = build_assessment_reason_lines(
         lookup_result,
         final_risk,
@@ -294,7 +295,7 @@ def format_found_company(
                 tax_included=is_successful_tax(tax_data),
                 domain_reputation_included=is_checked_domain_reputation(domain_reputation_data),
                 contacts_summary=contacts_summary,
-                prozorro_included=prozorro_included,
+                prozorro_included=prozorro_source_included,
             ),
             "Результат має інформаційний характер і не є юридичним висновком.",
         ]
@@ -355,6 +356,25 @@ def format_sources(
 
 def is_reportable_prozorro_analysis(prozorro_analysis: ProzorroAnalysis | None) -> bool:
     return bool(prozorro_analysis and prozorro_analysis.status in {"found", "partial", "source_error"})
+
+
+def build_prozorro_section_lines(lookup_result: CompanyLookupResult) -> list[str]:
+    if is_reportable_prozorro_analysis(lookup_result.prozorro_analysis):
+        return build_prozorro_lines(lookup_result.prozorro_analysis)
+    return build_prozorro_tender_fallback_lines(lookup_result.company_data)
+
+
+def build_prozorro_tender_fallback_lines(company: CompanyData | None) -> list[str]:
+    if company is None:
+        return []
+    tenders_text = format_tenders(company)
+    if not tenders_text:
+        return []
+    return [
+        f"За відкритими даними знайдено участь у тендерах: {tenders_text}.",
+        "Детальна історія закупівель Prozorro ще не підключена або не передана.",
+        "Примітка: сам факт участі у тендерах не є ризиком. Score не підвищено.",
+    ]
 
 
 def build_prozorro_lines(prozorro_analysis: ProzorroAnalysis | None) -> list[str]:

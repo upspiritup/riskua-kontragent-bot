@@ -201,6 +201,31 @@ class BotResponseTests(unittest.TestCase):
         self.assertNotIn("Prozorro:", response)
         self.assertNotIn("Prozorro", response.split("Джерело: Opendatabot")[-1])
 
+    def test_found_company_response_shows_tender_fallback_when_prozorro_analysis_missing(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(
+                short_name='ТОВ "Тест"',
+                edrpou="12345678",
+                status="зареєстровано",
+                tenders_count=7,
+                tenders_text="7 тендерів",
+            ),
+        )
+
+        response = build_edrpou_response("12345678", result)
+
+        self.assertIn("Prozorro:", response)
+        self.assertIn("За відкритими даними знайдено участь у тендерах: 7 тендерів.", response)
+        self.assertIn("Детальна історія закупівель Prozorro ще не підключена або не передана.", response)
+        self.assertIn("Score не підвищено.", response)
+        self.assertIn("Джерело: Opendatabot", response)
+        self.assertNotIn("Джерела: Opendatabot, Prozorro", response)
+
     def test_recommendation_text_changes_by_risk_level(self):
         from app.bot import build_recommendation_text
 
