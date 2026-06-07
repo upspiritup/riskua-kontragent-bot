@@ -208,6 +208,46 @@ class RiskScoringTests(unittest.TestCase):
         self.assertEqual(result["conflicts"][0]["found_sources"], ["clarity_project"])
         self.assertEqual(result["conflicts"][0]["not_found_sources"], ["youcontrol"])
 
+    def test_prozorro_specific_flags_have_expected_weights(self):
+        from app.services.risk_scoring import calculate_final_risk
+
+        result = calculate_final_risk(
+            [
+                {"type": "multiple_prozorro_terminations_found", "source": "prozorro_analysis"},
+                {"type": "frequent_prozorro_disqualifications", "source": "prozorro_analysis"},
+                {"type": "single_buyer_concentration", "source": "prozorro_analysis"},
+            ]
+        )
+
+        self.assertEqual(
+            [reason["type"] for reason in result["reasons"]],
+            [
+                "multiple_prozorro_terminations_found",
+                "frequent_prozorro_disqualifications",
+                "single_buyer_concentration",
+            ],
+        )
+        self.assertEqual([reason["weight"] for reason in result["reasons"]], [35, 20, 15])
+        self.assertEqual(result["score"], 65)
+
+    def test_all_new_prozorro_flags_are_known(self):
+        from app.services.risk_scoring import calculate_final_risk
+
+        flags = [
+            "problematic_documents_found",
+            "qualification_mismatch_found",
+            "low_competition_wins",
+            "frequent_contract_changes",
+            "substantial_contract_amount_increase",
+            "possible_prozorro_dumping",
+            "supplier_related_prozorro_complaints",
+        ]
+
+        result = calculate_final_risk([{"type": flag, "source": "prozorro_analysis"} for flag in flags])
+
+        self.assertEqual([reason["type"] for reason in result["reasons"]], flags)
+        self.assertEqual([reason["weight"] for reason in result["reasons"]], [35, 20, 15, 10, 20, 10, 15])
+
 
 if __name__ == "__main__":
     unittest.main()

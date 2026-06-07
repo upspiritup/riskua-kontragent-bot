@@ -189,6 +189,56 @@ RISK_FLAG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "label_uk": "Розірвання в Prozorro",
         "description": "Є ознаки розірваних закупівель або проблемних завершень у Prozorro.",
     },
+    "multiple_prozorro_terminations_found": {
+        "weight": 35,
+        "label_uk": "Кілька розірвань договорів у Prozorro",
+        "description": "Знайдено кілька розірвань договорів або високу частку розірваних договорів у Prozorro.",
+    },
+    "frequent_prozorro_disqualifications": {
+        "weight": 20,
+        "label_uk": "Часті відхилення в Prozorro",
+        "description": "Компанію часто відхиляли в закупівлях або частка відхилень є високою.",
+    },
+    "problematic_documents_found": {
+        "weight": 35,
+        "label_uk": "Проблемні/недостовірні документи",
+        "description": "У причинах відхилення знайдено ознаки проблемних, недостовірних або неналежних документів.",
+    },
+    "qualification_mismatch_found": {
+        "weight": 20,
+        "label_uk": "Невідповідність кваліфікаційним вимогам",
+        "description": "У Prozorro є ознаки невідповідності кваліфікаційним вимогам закупівлі.",
+    },
+    "single_buyer_concentration": {
+        "weight": 15,
+        "label_uk": "Значна концентрація договорів на одному замовнику",
+        "description": "Значна частина договорів або суми договорів припадає на одного замовника.",
+    },
+    "low_competition_wins": {
+        "weight": 15,
+        "label_uk": "Перемоги у закупівлях з низькою конкуренцією",
+        "description": "Компанія часто перемагала у закупівлях з одним учасником або дуже низькою конкуренцією.",
+    },
+    "frequent_contract_changes": {
+        "weight": 10,
+        "label_uk": "Часті зміни договорів у Prozorro",
+        "description": "За договорами знайдено багато додаткових угод або часті зміни умов.",
+    },
+    "substantial_contract_amount_increase": {
+        "weight": 20,
+        "label_uk": "Суттєве збільшення суми договорів у Prozorro",
+        "description": "Через зміни договору сума суттєво збільшувалась.",
+    },
+    "possible_prozorro_dumping": {
+        "weight": 10,
+        "label_uk": "Можливий демпінг у Prozorro",
+        "description": "Компанія неодноразово подавала пропозиції суттєво нижче очікуваної вартості.",
+    },
+    "supplier_related_prozorro_complaints": {
+        "weight": 15,
+        "label_uk": "Скарги в Prozorro, пов'язані з постачальником",
+        "description": "Знайдено скарги, які прямо стосуються компанії, її документів або дій.",
+    },
     "young_company": {
         "weight": 15,
         "label_uk": "Молода компанія",
