@@ -20,3 +20,31 @@ class ProzorroApiTimeoutTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(records, [])
+
+    async def test_fetch_recent_procurements_skips_failed_detail_and_continues(self):
+        from app.services.prozorro_api_source import fetch_recent_prozorro_procurements_by_edrpou
+
+        async def fetch_json(url: str):
+            if "/tenders/ocds-failing-detail" in url:
+                raise OSError("detail timeout")
+            if "/tenders/ocds-matching-detail" in url:
+                return {
+                    "data": {
+                        "id": "ocds-matching-detail",
+                        "tenderID": "UA-MATCH-1",
+                        "bids": [{"tenderers": [{"identifier": {"id": "12345678"}}]}],
+                    }
+                }
+            return {
+                "data": [{"id": "ocds-failing-detail"}, {"id": "ocds-matching-detail"}],
+                "next_page": {},
+            }
+
+        records = await fetch_recent_prozorro_procurements_by_edrpou(
+            "12345678",
+            max_pages=1,
+            fetch_json=fetch_json,
+            timeout_seconds=1,
+        )
+
+        self.assertEqual([record.procurement_id for record in records], ["UA-MATCH-1"])

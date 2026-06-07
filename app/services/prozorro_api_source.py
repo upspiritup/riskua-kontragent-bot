@@ -52,7 +52,14 @@ async def fetch_recent_prozorro_procurements_by_edrpou(
                 if not tender_id:
                     continue
                 detail_url = build_tender_detail_url(str(tender_id))
-                detail_payload = await fetch_json_with_deadline(fetch_json, detail_url, deadline)
+                try:
+                    detail_payload = await fetch_json_with_deadline(fetch_json, detail_url, deadline)
+                except Exception as exc:
+                    if search_time_exhausted(deadline):
+                        log_live_time_budget_reached(logger, edrpou, records)
+                        return records
+                    logger.info("Prozorro tender detail fetch failed tender_id=%s error=%s", tender_id, exc)
+                    continue
                 logger.info("Prozorro tender detail fetched tender_id=%s", tender_id)
                 detail = detail_payload.get("data") if isinstance(detail_payload, dict) else None
                 if not isinstance(detail, dict):
