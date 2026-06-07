@@ -47,6 +47,7 @@ from app.services.opendatabot_lookup import (
     SOURCE_ERROR,
     lookup_company,
 )
+from app.services.prozorro_lookup import lookup_prepared_prozorro
 from app.services.risk_scoring import RISK_FLAG_ALIASES, calculate_final_risk
 from app.services.tax_lookup import fetch_tax_status
 from app.services.youcontrol_lookup import fetch_youcontrol_company
@@ -1351,21 +1352,26 @@ async def run_source_lookups(
     contacts_lookup: Callable[[str, dict | None], dict | None] = fetch_company_contacts_async,
     website_url: str | None = None,
     analysis_timeout: float = ANALYSIS_TIMEOUT_SECONDS,
+    prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
 ) -> tuple[CompanyLookupResult, ClarityData | None, dict | None, dict | None, dict | None, dict | None, dict | None]:
     lookup_task = asyncio.create_task(asyncio.to_thread(lookup, edrpou))
     clarity_task = asyncio.create_task(asyncio.to_thread(clarity_lookup, edrpou))
     youcontrol_task = asyncio.create_task(asyncio.to_thread(youcontrol_lookup, edrpou))
     debtors_task = asyncio.create_task(asyncio.to_thread(debtors_lookup, edrpou))
     tax_task = asyncio.create_task(asyncio.to_thread(tax_lookup, edrpou))
-    await asyncio.wait({lookup_task, clarity_task, youcontrol_task, debtors_task, tax_task}, timeout=analysis_timeout)
+    prozorro_task = asyncio.create_task(asyncio.to_thread(prozorro_lookup, edrpou))
+    first_batch_tasks = {lookup_task, clarity_task, youcontrol_task, debtors_task, tax_task, prozorro_task}
+    await asyncio.wait(first_batch_tasks, timeout=analysis_timeout)
 
     result = completed_lookup_result(lookup_task, edrpou)
     clarity_data = completed_clarity_result(clarity_task, edrpou)
     youcontrol_data = completed_youcontrol_result(youcontrol_task, edrpou)
     debtors_registry_data = completed_debtors_result(debtors_task, edrpou)
     tax_data = completed_tax_result(tax_task, edrpou)
+    prozorro_analysis = completed_prozorro_result(prozorro_task, edrpou)
+    result = result.model_copy(update={"prozorro_analysis": prozorro_analysis})
 
-    for task in (lookup_task, clarity_task, youcontrol_task, debtors_task, tax_task):
+    for task in first_batch_tasks:
         if not task.done():
             task.cancel()
 
@@ -1448,6 +1454,19 @@ def completed_tax_result(
     except Exception:
         logging.exception("Tax lookup failed for EDRPOU %s", edrpou)
         return tax_source_error_result(edrpou, "lookup_failed")
+
+
+def completed_prozorro_result(
+    task: asyncio.Task[ProzorroAnalysis],
+    edrpou: str,
+) -> ProzorroAnalysis:
+    if task.cancelled() or not task.done():
+        return ProzorroAnalysis(status="source_error", error="analysis_timeout")
+    try:
+        return task.result()
+    except Exception:
+        logging.exception("Prozorro lookup failed for EDRPOU %s", edrpou)
+        return ProzorroAnalysis(status="source_error", error="lookup_failed")
 
 
 def completed_domain_reputation_result(
@@ -2512,6 +2531,7 @@ async def debug_handler(
     tax_lookup: Callable[[str], dict | None] = fetch_tax_status,
     domain_reputation_lookup: Callable[[str | None, dict | None], dict | None] = fetch_domain_reputation,
     contacts_lookup: Callable[[str, dict | None], dict | None] = fetch_company_contacts_async,
+    prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
     analysis_timeout: float = ANALYSIS_TIMEOUT_SECONDS,
 ) -> None:
     edrpou = extract_debug_edrpou(message.text or "")
@@ -2528,8 +2548,9 @@ async def debug_handler(
         tax_lookup,
         domain_reputation_lookup,
         contacts_lookup,
-        None,
-        analysis_timeout,
+        website_url=None,
+        analysis_timeout=analysis_timeout,
+        prozorro_lookup=prozorro_lookup,
     )
     enriched = with_source_diagnostics(
         result,
@@ -2655,6 +2676,7 @@ async def edrpou_handler(
     tax_lookup: Callable[[str], dict | None] = fetch_tax_status,
     domain_reputation_lookup: Callable[[str | None, dict | None], dict | None] = fetch_domain_reputation,
     contacts_lookup: Callable[[str, dict | None], dict | None] = fetch_company_contacts_async,
+    prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
     save: Callable[[CompanyLookupResult, int | None], object] = save_check_result,
     analysis_timeout: float = ANALYSIS_TIMEOUT_SECONDS,
 ) -> None:
@@ -2674,8 +2696,9 @@ async def edrpou_handler(
         tax_lookup,
         domain_reputation_lookup,
         contacts_lookup,
-        website_url,
-        analysis_timeout,
+        website_url=website_url,
+        analysis_timeout=analysis_timeout,
+        prozorro_lookup=prozorro_lookup,
     )
     user_id = getattr(getattr(message, "from_user", None), "id", None)
     try:

@@ -1746,6 +1746,137 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lookup_saw_clarity_started, [True])
         self.assertIn("Джерела: Opendatabot, Clarity", message.answers[1])
 
+    async def test_edrpou_handler_shows_prozorro_from_injected_lookup(self):
+        from app.bot import edrpou_handler
+        from app.models.clarity import ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+
+        message = FakeMessage("12345678", user_id=777)
+        saved_results: list[CompanyLookupResult] = []
+
+        def found_lookup(edrpou: str) -> CompanyLookupResult:
+            return CompanyLookupResult(
+                status="found",
+                edrpou=edrpou,
+                company_data=CompanyData(short_name='ТОВ "ПРОЗОРО"', edrpou=edrpou),
+            )
+
+        def found_clarity_lookup(edrpou: str) -> ClarityData:
+            return ClarityData(source_url=f"https://clarity-project.info/edr/{edrpou}", status="found", edrpou=edrpou)
+
+        def prepared_prozorro_lookup(edrpou: str) -> ProzorroAnalysis:
+            return ProzorroAnalysis(
+                status="found",
+                stats=ProzorroStats(
+                    procurements_count=2,
+                    participations_count=2,
+                    wins_count=1,
+                    contracts_count=1,
+                    terminated_contracts_count=0,
+                    last_participation_date="2026-01-10",
+                ),
+                summary="Prozorro: участей 2, перемог 1, договорів 1, розірвань 0.",
+                info_notes=["Сам факт участі не є ризиком."],
+            )
+
+        await edrpou_handler(
+            message,
+            lookup=found_lookup,
+            clarity_lookup=found_clarity_lookup,
+            youcontrol_lookup=no_youcontrol_lookup,
+            debtors_lookup=no_debtors_lookup,
+            tax_lookup=no_tax_lookup,
+            domain_reputation_lookup=no_domain_reputation_lookup,
+            contacts_lookup=no_contacts_lookup,
+            prozorro_lookup=prepared_prozorro_lookup,
+            save=lambda result, user_id: saved_results.append(result),
+        )
+
+        self.assertIn("Prozorro:", message.answers[1])
+        self.assertIn("Участей: 2", message.answers[1])
+        self.assertIn("Перемог: 1", message.answers[1])
+        self.assertIn("Остання участь: 2026-01-10", message.answers[1])
+        self.assertIn("Джерела: Opendatabot, Clarity, Prozorro", message.answers[1])
+        self.assertEqual(saved_results[0].prozorro_analysis.status, "found")
+
+    async def test_edrpou_handler_keeps_score_when_prozorro_source_errors(self):
+        from app.bot import edrpou_handler
+        from app.models.clarity import ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis
+
+        message = FakeMessage("12345678", user_id=777)
+        saved_results: list[CompanyLookupResult] = []
+
+        def found_lookup(edrpou: str) -> CompanyLookupResult:
+            return CompanyLookupResult(
+                status="found",
+                edrpou=edrpou,
+                company_data=CompanyData(short_name='ТОВ "ПРОЗОРО"', edrpou=edrpou),
+            )
+
+        def found_clarity_lookup(edrpou: str) -> ClarityData:
+            return ClarityData(source_url=f"https://clarity-project.info/edr/{edrpou}", status="found", edrpou=edrpou)
+
+        def failed_prozorro_lookup(edrpou: str) -> ProzorroAnalysis:
+            return ProzorroAnalysis(
+                status="source_error",
+                error="cache_unavailable",
+                risk_flags=[{"type": "multiple_prozorro_terminations_found"}],
+            )
+
+        await edrpou_handler(
+            message,
+            lookup=found_lookup,
+            clarity_lookup=found_clarity_lookup,
+            youcontrol_lookup=no_youcontrol_lookup,
+            debtors_lookup=no_debtors_lookup,
+            tax_lookup=no_tax_lookup,
+            domain_reputation_lookup=no_domain_reputation_lookup,
+            contacts_lookup=no_contacts_lookup,
+            prozorro_lookup=failed_prozorro_lookup,
+            save=lambda result, user_id: saved_results.append(result),
+        )
+
+        self.assertEqual(saved_results[0].risk_summary.score, 0)
+        self.assertNotIn(
+            "multiple_prozorro_terminations_found",
+            [reason["type"] for reason in saved_results[0].risk_summary.reasons],
+        )
+
+    async def test_run_source_lookups_attaches_prozorro_analysis(self):
+        from app.bot import run_source_lookups
+        from app.models.clarity import ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+
+        def found_lookup(edrpou: str) -> CompanyLookupResult:
+            return CompanyLookupResult(
+                status="found",
+                edrpou=edrpou,
+                company_data=CompanyData(short_name='ТОВ "ПРОЗОРО"', edrpou=edrpou),
+            )
+
+        def found_clarity_lookup(edrpou: str) -> ClarityData:
+            return ClarityData(source_url=f"https://clarity-project.info/edr/{edrpou}", status="found", edrpou=edrpou)
+
+        def prepared_prozorro_lookup(edrpou: str) -> ProzorroAnalysis:
+            return ProzorroAnalysis(status="found", stats=ProzorroStats(procurements_count=3))
+
+        result, *_ = await run_source_lookups(
+            "12345678",
+            found_lookup,
+            found_clarity_lookup,
+            no_youcontrol_lookup,
+            no_debtors_lookup,
+            no_tax_lookup,
+            no_domain_reputation_lookup,
+            no_contacts_lookup,
+            analysis_timeout=1,
+            prozorro_lookup=prepared_prozorro_lookup,
+        )
+
+        self.assertEqual(result.prozorro_analysis.status, "found")
+        self.assertEqual(result.prozorro_analysis.stats.procurements_count, 3)
+
     async def test_valid_edrpou_uses_opendatabot_result_when_clarity_times_out(self):
         from app.bot import edrpou_handler
         from app.models.clarity import ClarityData, ClaritySignals, ClarityTax
