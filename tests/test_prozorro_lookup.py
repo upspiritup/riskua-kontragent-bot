@@ -2,19 +2,95 @@ from __future__ import annotations
 
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 class ProzorroLookupTests(unittest.TestCase):
     def test_default_lookup_returns_not_found_without_cache(self):
         from app.services.prozorro_lookup import lookup_prepared_prozorro
 
-        with patch.dict("os.environ", {"PROZORRO_CACHE_PATH": ""}, clear=False):
+        with patch.dict("os.environ", {"PROZORRO_CACHE_PATH": "", "PROZORRO_LIVE_ENABLED": "0"}, clear=False):
             result = lookup_prepared_prozorro("12345678")
 
         self.assertEqual(result.status, "not_found")
         self.assertEqual(result.stats.procurements_count, 0)
         self.assertEqual(result.risk_flags, [])
+
+    def test_lookup_uses_default_live_source_after_cache_miss(self):
+        from app.models.company_lookup import ProzorroProcurement
+        from app.services.prozorro_lookup import lookup_prepared_prozorro
+
+        with (
+            patch.dict("os.environ", {"PROZORRO_CACHE_PATH": ""}, clear=True),
+            patch("app.services.prozorro_lookup.fetch_recent_prozorro_procurements_sync") as live_fetch,
+        ):
+            live_fetch.return_value = [
+                ProzorroProcurement(
+                    procurement_id="UA-LIVE-DEFAULT-1",
+                    participated=True,
+                    won=True,
+                    has_contract=True,
+                )
+            ]
+
+            result = lookup_prepared_prozorro("12345678", source=lambda edrpou: None)
+
+        live_fetch.assert_called_once_with("12345678")
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.stats.procurements_count, 1)
+        self.assertEqual(result.stats.wins_count, 1)
+
+    def test_sync_live_fetch_uses_one_minute_search_budget_by_default(self):
+        from app.services.prozorro_lookup import fetch_recent_prozorro_procurements_sync
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "app.services.prozorro_lookup.fetch_recent_prozorro_procurements_by_edrpou",
+                new_callable=AsyncMock,
+            ) as live_fetch,
+        ):
+            live_fetch.return_value = []
+
+            result = fetch_recent_prozorro_procurements_sync("12345678")
+
+        self.assertEqual(result, [])
+        live_fetch.assert_awaited_once_with(
+            "12345678",
+            max_pages=20,
+            limit=100,
+            timeout_seconds=60.0,
+        )
+
+    def test_sync_live_fetch_allows_search_budget_override(self):
+        from app.services.prozorro_lookup import fetch_recent_prozorro_procurements_sync
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "PROZORRO_LIVE_MAX_PAGES": "5",
+                    "PROZORRO_LIVE_LIMIT": "25",
+                    "PROZORRO_LIVE_SEARCH_TIMEOUT_SECONDS": "15",
+                },
+                clear=True,
+            ),
+            patch(
+                "app.services.prozorro_lookup.fetch_recent_prozorro_procurements_by_edrpou",
+                new_callable=AsyncMock,
+            ) as live_fetch,
+        ):
+            live_fetch.return_value = []
+
+            result = fetch_recent_prozorro_procurements_sync("12345678")
+
+        self.assertEqual(result, [])
+        live_fetch.assert_awaited_once_with(
+            "12345678",
+            max_pages=5,
+            limit=25,
+            timeout_seconds=15.0,
+        )
 
     def test_lookup_analyzes_prepared_records_from_injected_source(self):
         from app.services.prozorro_lookup import lookup_prepared_prozorro
@@ -157,10 +233,11 @@ class ProzorroLookupTests(unittest.TestCase):
             )
 
             self.assertIsNone(load_prozorro_cache_file("87654321", cache_path))
-            analysis = lookup_prepared_prozorro(
-                "87654321",
-                source=lambda edrpou: load_prozorro_cache_file(edrpou, cache_path),
-            )
+            with patch.dict("os.environ", {"PROZORRO_LIVE_ENABLED": "0"}, clear=False):
+                analysis = lookup_prepared_prozorro(
+                    "87654321",
+                    source=lambda edrpou: load_prozorro_cache_file(edrpou, cache_path),
+                )
 
         self.assertEqual(analysis.status, "not_found")
         self.assertEqual(analysis.risk_flags, [])

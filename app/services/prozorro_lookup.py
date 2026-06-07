@@ -65,13 +65,24 @@ def load_live_prozorro_records(
 
 
 def prozorro_live_enabled() -> bool:
-    return os.environ.get("PROZORRO_LIVE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+    value = os.environ.get("PROZORRO_LIVE_ENABLED")
+    if value is None:
+        return True
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def fetch_recent_prozorro_procurements_sync(edrpou: str) -> list[ProzorroProcurement]:
-    max_pages = int(os.environ.get("PROZORRO_LIVE_MAX_PAGES", "3"))
+    max_pages = int(os.environ.get("PROZORRO_LIVE_MAX_PAGES", "20"))
     limit = int(os.environ.get("PROZORRO_LIVE_LIMIT", "100"))
-    return asyncio.run(fetch_recent_prozorro_procurements_by_edrpou(edrpou, max_pages=max_pages, limit=limit))
+    timeout_seconds = float(os.environ.get("PROZORRO_LIVE_SEARCH_TIMEOUT_SECONDS", "60"))
+    return asyncio.run(
+        fetch_recent_prozorro_procurements_by_edrpou(
+            edrpou,
+            max_pages=max_pages,
+            limit=limit,
+            timeout_seconds=timeout_seconds,
+        )
+    )
 
 
 def log_prozorro_analysis_done(edrpou: str, analysis: ProzorroAnalysis) -> None:
