@@ -2531,8 +2531,8 @@ async def debug_handler(
     tax_lookup: Callable[[str], dict | None] = fetch_tax_status,
     domain_reputation_lookup: Callable[[str | None, dict | None], dict | None] = fetch_domain_reputation,
     contacts_lookup: Callable[[str, dict | None], dict | None] = fetch_company_contacts_async,
-    prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
     analysis_timeout: float = ANALYSIS_TIMEOUT_SECONDS,
+    prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
 ) -> None:
     edrpou = extract_debug_edrpou(message.text or "")
     if not edrpou:
@@ -2676,9 +2676,9 @@ async def edrpou_handler(
     tax_lookup: Callable[[str], dict | None] = fetch_tax_status,
     domain_reputation_lookup: Callable[[str | None, dict | None], dict | None] = fetch_domain_reputation,
     contacts_lookup: Callable[[str, dict | None], dict | None] = fetch_company_contacts_async,
-    prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
     save: Callable[[CompanyLookupResult, int | None], object] = save_check_result,
     analysis_timeout: float = ANALYSIS_TIMEOUT_SECONDS,
+    prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
 ) -> None:
     text = message.text or ""
     edrpou, website_url = parse_edrpou_query(text)

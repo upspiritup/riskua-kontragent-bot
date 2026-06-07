@@ -1877,6 +1877,78 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.prozorro_analysis.status, "found")
         self.assertEqual(result.prozorro_analysis.stats.procurements_count, 3)
 
+    async def test_edrpou_handler_preserves_positional_save_argument(self):
+        from app.bot import edrpou_handler
+        from app.models.clarity import ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        message = FakeMessage("12345678", user_id=777)
+        saved_results: list[CompanyLookupResult] = []
+
+        def found_lookup(edrpou: str) -> CompanyLookupResult:
+            return CompanyLookupResult(
+                status="found",
+                edrpou=edrpou,
+                company_data=CompanyData(short_name='ТОВ "ПРОЗОРО"', edrpou=edrpou),
+            )
+
+        def found_clarity_lookup(edrpou: str) -> ClarityData:
+            return ClarityData(source_url=f"https://clarity-project.info/edr/{edrpou}", status="found", edrpou=edrpou)
+
+        await edrpou_handler(
+            message,
+            found_lookup,
+            found_clarity_lookup,
+            no_youcontrol_lookup,
+            no_debtors_lookup,
+            no_tax_lookup,
+            no_domain_reputation_lookup,
+            no_contacts_lookup,
+            lambda result, user_id: saved_results.append(result),
+            1,
+        )
+
+        self.assertEqual(len(saved_results), 1)
+        self.assertEqual(saved_results[0].edrpou, "12345678")
+        self.assertIsNotNone(saved_results[0].prozorro_analysis)
+        self.assertEqual(saved_results[0].prozorro_analysis.status, "not_found")
+
+    async def test_debug_handler_preserves_positional_analysis_timeout_argument(self):
+        from app.bot import debug_handler
+        from app.models.clarity import ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        message = FakeMessage("/debug 12345678")
+        release_slow_lookup = Event()
+
+        def found_lookup(edrpou: str) -> CompanyLookupResult:
+            release_slow_lookup.wait(0.05)
+            return CompanyLookupResult(
+                status="found",
+                edrpou=edrpou,
+                company_data=CompanyData(short_name='ТОВ "ПРОЗОРО"', edrpou=edrpou),
+            )
+
+        def found_clarity_lookup(edrpou: str) -> ClarityData:
+            return ClarityData(source_url=f"https://clarity-project.info/edr/{edrpou}", status="found", edrpou=edrpou)
+
+        await debug_handler(
+            message,
+            found_lookup,
+            found_clarity_lookup,
+            no_youcontrol_lookup,
+            no_debtors_lookup,
+            no_tax_lookup,
+            no_domain_reputation_lookup,
+            no_contacts_lookup,
+            0.01,
+        )
+        release_slow_lookup.set()
+
+        self.assertEqual(len(message.answers), 1)
+        self.assertIn('"edrpou": "12345678"', message.answers[0])
+        self.assertIn("opendatabot", json.loads(message.answers[0])["sources_unavailable"])
+
     async def test_valid_edrpou_uses_opendatabot_result_when_clarity_times_out(self):
         from app.bot import edrpou_handler
         from app.models.clarity import ClarityData, ClaritySignals, ClarityTax
