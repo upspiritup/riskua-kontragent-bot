@@ -88,6 +88,73 @@ class CourtData(BaseModel):
     parse_warnings: list[str] = Field(default_factory=list)
 
 
+class ProzorroProcurement(BaseModel):
+    procurement_id: str | None = None
+    url: str | None = None
+    title: str | None = None
+    cpv_code: str | None = None
+    cpv_name: str | None = None
+    procedure_type: str | None = None
+    status: str | None = None
+    expected_value_uah: float | None = None
+    bid_value_uah: float | None = None
+    contract_value_uah: float | None = None
+    buyer_name: str | None = None
+    buyer_edrpou: str | None = None
+    participants_count: int | None = None
+    participated: bool = False
+    won: bool = False
+    disqualified: bool = False
+    disqualification_reason: str | None = None
+    has_contract: bool = False
+    contract_completed: bool = False
+    contract_terminated: bool = False
+    termination_reason: str | None = None
+    complaints_count: int = 0
+    supplier_related_complaints_count: int = 0
+    amendments_count: int = 0
+    contract_amount_change_uah: float | None = None
+    contract_amount_change_percent: float | None = None
+    date: str | None = None
+    award_date: str | None = None
+    contract_date: str | None = None
+
+
+class ProzorroStats(BaseModel):
+    procurements_count: int = 0
+    participations_count: int = 0
+    wins_count: int = 0
+    contracts_count: int = 0
+    completed_contracts_count: int = 0
+    terminated_contracts_count: int = 0
+    disqualifications_count: int = 0
+    complaints_count: int = 0
+    supplier_related_complaints_count: int = 0
+    first_participation_date: str | None = None
+    last_participation_date: str | None = None
+    last_win_date: str | None = None
+    win_rate_percent: float | None = None
+    termination_rate_percent: float | None = None
+    disqualification_rate_percent: float | None = None
+    single_buyer_contract_share_percent: float | None = None
+    single_buyer_value_share_percent: float | None = None
+    low_competition_wins_count: int = 0
+    high_discount_bids_count: int = 0
+
+
+class ProzorroAnalysis(BaseModel):
+    source: str = "prozorro_analysis"
+    status: Literal["found", "not_found", "partial", "source_error"] = "not_found"
+    stats: ProzorroStats = Field(default_factory=ProzorroStats)
+    procurements: list[ProzorroProcurement] = Field(default_factory=list)
+    risk_flags: list[dict[str, Any]] = Field(default_factory=list)
+    info_notes: list[str] = Field(default_factory=list)
+    summary: str | None = None
+    parse_warnings: list[str] = Field(default_factory=list)
+    error: str | None = None
+    checked_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class RiskInput(BaseModel):
     company_age_years: int | None = None
     has_full_registration_data: bool = False
@@ -165,6 +232,7 @@ class CompanyLookupResult(BaseModel):
     debtors_registry_data: dict[str, Any] | None = None
     tax_data: dict[str, Any] | None = None
     domain_reputation_data: dict[str, Any] | None = None
+    prozorro_analysis: ProzorroAnalysis | None = None
     contacts_summary: dict[str, Any] | None = None
     sources: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
