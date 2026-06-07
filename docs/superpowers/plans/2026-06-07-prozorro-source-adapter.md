@@ -153,6 +153,15 @@ from app.services.prozorro_analysis import analyze_prozorro_data
 
 PreparedProzorroSource = Callable[[str], Any]
 PROZORRO_CACHE_PATH_ENV = "PROZORRO_CACHE_PATH"
+EDRPOU_FIELDS = (
+    "edrpou",
+    "supplier_edrpou",
+    "supplier_identifier",
+    "supplier_code",
+    "participant_edrpou",
+    "participant_identifier",
+    "company_edrpou",
+)
 
 
 def lookup_prepared_prozorro(
@@ -177,14 +186,31 @@ def load_prozorro_cache_file(edrpou: str, path: str | os.PathLike[str] | None = 
         return None
 
     payload = json.loads(cache_path.read_text(encoding="utf-8-sig"))
-    if isinstance(payload, dict) and "items" in payload:
-        by_edrpou = payload.get("items") or {}
-        if isinstance(by_edrpou, dict):
-            return by_edrpou.get(edrpou)
-        return payload
+    if isinstance(payload, list):
+        matched = filter_items_by_edrpou(payload, edrpou)
+        return matched or None
     if isinstance(payload, dict):
-        return payload.get(edrpou)
+        if edrpou in payload:
+            return payload.get(edrpou)
+        items = payload.get("items")
+        if isinstance(items, dict):
+            return items.get(edrpou)
+        if isinstance(items, list):
+            matched = filter_items_by_edrpou(items, edrpou)
+            return matched or None
     return None
+
+
+def filter_items_by_edrpou(items: list[Any], edrpou: str) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in items
+        if isinstance(item, dict) and item_matches_edrpou(item, edrpou)
+    ]
+
+
+def item_matches_edrpou(item: dict[str, Any], edrpou: str) -> bool:
+    return any(str(item.get(field) or "").strip() == edrpou for field in EDRPOU_FIELDS)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
