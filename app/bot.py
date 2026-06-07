@@ -2637,6 +2637,9 @@ def checked_sources(sources: dict) -> list[str]:
     domain_reputation = sources.get("domain_reputation") or {}
     if domain_reputation and domain_reputation.get("checked"):
         checked.append("domain_reputation")
+    prozorro = sources.get("prozorro") or {}
+    if prozorro and prozorro.get("status") in {"found", "partial"}:
+        checked.append("prozorro")
     if sources.get("contacts_summary"):
         checked.append("contacts_summary")
     if sources.get("court_analysis"):
@@ -2664,6 +2667,9 @@ def unavailable_sources(sources: dict) -> list[str]:
     domain_reputation = sources.get("domain_reputation") or {}
     if domain_reputation and domain_reputation.get("error") == "website_source_unavailable":
         unavailable.append("domain_reputation")
+    prozorro = sources.get("prozorro") or {}
+    if prozorro and prozorro.get("status") == "source_error":
+        unavailable.append("prozorro")
     return unavailable
 
 

@@ -2984,6 +2984,34 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["risk_flags"][0]["type"], "tax_debt_found")
         self.assertNotEqual(payload["final_level"], "critical")
 
+    def test_debug_payload_lists_prozorro_source(self):
+        from app.bot import build_debug_payload, with_source_diagnostics
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            prozorro_analysis=ProzorroAnalysis(status="found", stats=ProzorroStats(procurements_count=2)),
+        )
+
+        payload = build_debug_payload(with_source_diagnostics(result, None))
+
+        self.assertIn("prozorro", payload["sources_checked"])
+
+    def test_debug_payload_lists_unavailable_prozorro_source(self):
+        from app.bot import build_debug_payload, with_source_diagnostics
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            prozorro_analysis=ProzorroAnalysis(status="source_error", error="cache_unavailable"),
+        )
+
+        payload = build_debug_payload(with_source_diagnostics(result, None))
+
+        self.assertIn("prozorro", payload["sources_unavailable"])
+
     async def test_debug_handler_returns_exact_raw_court_and_enforcement_counts(self):
         from app.bot import debug_handler
         from app.models.clarity import ClarityData, ClaritySignals
