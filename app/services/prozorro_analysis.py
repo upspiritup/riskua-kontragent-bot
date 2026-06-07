@@ -7,6 +7,51 @@ from app.models.company_lookup import ProzorroAnalysis, ProzorroProcurement, Pro
 
 
 SOURCE = "prozorro_analysis"
+NONPERFORMANCE_MARKERS = [
+    "refusal to supply",
+    "deadline breach",
+    "failed to supply",
+    "nonperformance",
+    "\u0432\u0456\u0434\u043c\u043e\u0432\u0430 \u0432\u0456\u0434 \u043f\u043e\u0441\u0442\u0430\u0447\u0430\u043d\u043d\u044f",
+    "\u043f\u043e\u0440\u0443\u0448\u0435\u043d\u043d\u044f \u0441\u0442\u0440\u043e\u043a",
+    "\u043d\u0435\u0432\u0438\u043a\u043e\u043d\u0430\u043d\u043d\u044f",
+]
+DISQUALIFICATION_REASON_FLAGS = {
+    "large_tax_debt_found": [
+        "large tax debt",
+        "significant tax debt",
+        "\u0437\u043d\u0430\u0447\u043d\u0438\u0439 \u043f\u043e\u0434\u0430\u0442\u043a\u043e\u0432\u0438\u0439 \u0431\u043e\u0440\u0433",
+        "\u0432\u0435\u043b\u0438\u043a\u0438\u0439 \u043f\u043e\u0434\u0430\u0442\u043a\u043e\u0432\u0438\u0439 \u0431\u043e\u0440\u0433",
+    ],
+    "tax_debt_found": [
+        "tax debt is present",
+        "tax debt found",
+        "\u043f\u043e\u0434\u0430\u0442\u043a\u043e\u0432\u0438\u0439 \u0431\u043e\u0440\u0433",
+        "\u0437\u0430\u0431\u043e\u0440\u0433\u043e\u0432\u0430\u043d\u0456\u0441\u0442\u044c \u0437 \u043f\u043e\u0434\u0430\u0442\u043a",
+    ],
+    "bankruptcy_found": [
+        "bankrupt",
+        "bankruptcy",
+        "\u0431\u0430\u043d\u043a\u0440\u0443\u0442",
+    ],
+    "sanctions_found": [
+        "sanction",
+        "\u0441\u0430\u043d\u043a\u0446",
+    ],
+    "problematic_documents_found": [
+        "problematic documents",
+        "invalid documents",
+        "missing documents",
+        "\u043d\u0435\u0432\u0456\u0434\u043f\u043e\u0432\u0456\u0434\u043d\u0456 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442",
+        "\u043f\u0440\u043e\u0431\u043b\u0435\u043c\u043d\u0456 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442",
+    ],
+    "qualification_mismatch_found": [
+        "qualification mismatch",
+        "does not meet qualification",
+        "\u043d\u0435 \u0432\u0456\u0434\u043f\u043e\u0432\u0456\u0434\u0430\u0454 \u043a\u0432\u0430\u043b\u0456\u0444\u0456\u043a\u0430\u0446",
+        "\u043a\u0432\u0430\u043b\u0456\u0444\u0456\u043a\u0430\u0446\u0456\u0439\u043d\u0438\u043c \u043a\u0440\u0438\u0442\u0435\u0440\u0456\u044f\u043c",
+    ],
+}
 PRESENCE_NOTE = (
     "Компанія фігурує у публічних закупівлях. Сам факт участі не є ризиком, "
     "але дозволяє оцінити досвід, дисципліну та виконання договорів."
@@ -45,16 +90,108 @@ def analyze_prozorro_data(
     if stats.participations_count >= 3 and stats.wins_count == 0:
         notes.append(NO_WINS_NOTE)
 
+    risk_flags = build_risk_flags(procurements, stats)
+
     return ProzorroAnalysis(
         status="partial" if warnings else "found",
         stats=stats,
         procurements=procurements,
-        risk_flags=[],
+        risk_flags=risk_flags,
         info_notes=notes,
         summary=build_summary(stats),
         parse_warnings=warnings,
         checked_at=checked_at,
     )
+
+
+def build_risk_flags(procurements: list[ProzorroProcurement], stats: ProzorroStats) -> list[dict[str, Any]]:
+    flags: list[dict[str, Any]] = []
+    terminated = [item for item in procurements if item.has_contract and item.contract_terminated]
+    disqualified = [item for item in procurements if item.disqualified]
+
+    if terminated:
+        flags.append(
+            risk_flag(
+                "prozorro_termination_found",
+                terminated[0].termination_reason or terminated[0].procurement_id or "terminated contract",
+                "contract_terminated",
+            )
+        )
+    if stats.terminated_contracts_count >= 2 or (
+        stats.termination_rate_percent is not None and stats.termination_rate_percent >= 30
+    ):
+        flags.append(
+            risk_flag(
+                "multiple_prozorro_terminations_found",
+                f"terminated contracts: {stats.terminated_contracts_count}; termination rate: {stats.termination_rate_percent}%",
+                "terminated_contracts_count>=2_or_termination_rate>=30",
+            )
+        )
+
+    for item in terminated:
+        reason = item.termination_reason or ""
+        marker = text_has_marker(reason, NONPERFORMANCE_MARKERS)
+        if marker:
+            flags.append(risk_flag("contract_nonperformance_case", reason, marker))
+
+    if stats.disqualifications_count >= 3 or (
+        stats.disqualification_rate_percent is not None and stats.disqualification_rate_percent > 50
+    ):
+        flags.append(
+            risk_flag(
+                "frequent_prozorro_disqualifications",
+                (
+                    f"disqualifications: {stats.disqualifications_count}; "
+                    f"disqualification rate: {stats.disqualification_rate_percent}%"
+                ),
+                "disqualifications_count>=3_or_disqualification_rate>50",
+            )
+        )
+
+    for item in disqualified:
+        reason = item.disqualification_reason or ""
+        for flag_type, markers in DISQUALIFICATION_REASON_FLAGS.items():
+            if flag_type == "tax_debt_found" and text_has_marker(
+                reason, DISQUALIFICATION_REASON_FLAGS["large_tax_debt_found"]
+            ):
+                continue
+            marker = text_has_marker(reason, markers)
+            if marker:
+                flags.append(risk_flag(flag_type, reason, marker))
+
+    return dedupe_flags(flags)
+
+
+def risk_flag(flag_type: str, raw_text: str, matched_pattern: str) -> dict[str, Any]:
+    return {
+        "type": flag_type,
+        "source": SOURCE,
+        "status": "found",
+        "confidence": "medium",
+        "raw_text": raw_text,
+        "matched_pattern": matched_pattern,
+        "match_type": "positive_match",
+    }
+
+
+def dedupe_flags(flags: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique_flags: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for flag in flags:
+        flag_type = str(flag.get("type") or "")
+        if not flag_type or flag_type in seen:
+            continue
+        unique_flags.append(flag)
+        seen.add(flag_type)
+    return unique_flags
+
+
+def text_has_marker(text: str | None, markers: list[str]) -> str | None:
+    normalized = (text or "").casefold()
+    for marker in markers:
+        if marker.casefold() in normalized:
+            return marker
+    return None
 
 
 def normalize_procurements(data: Any) -> tuple[list[ProzorroProcurement], list[str], str | None]:
