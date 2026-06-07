@@ -61,6 +61,172 @@ class BotResponseTests(unittest.TestCase):
         self.assertEqual(highest_risk_level(["info", "medium"]), "medium")
         self.assertEqual(highest_risk_level(["medium", "high", "info"]), "high")
 
+    def test_build_risk_summary_includes_prozorro_analysis_flags(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            prozorro_analysis=ProzorroAnalysis(
+                status="found",
+                stats=ProzorroStats(procurements_count=1),
+                risk_flags=[
+                    {
+                        "type": "prozorro_termination_found",
+                        "source": "prozorro_analysis",
+                        "status": "found",
+                        "confidence": "medium",
+                        "raw_text": "Виявлено розірвання договору в Prozorro.",
+                    }
+                ],
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+
+        self.assertEqual(summary.score, 25)
+        self.assertEqual(summary.reasons[0]["type"], "prozorro_termination_found")
+        self.assertEqual(summary.reasons[0]["sources"], ["prozorro_analysis"])
+
+    def test_build_risk_summary_ignores_source_error_prozorro_flags(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            prozorro_analysis=ProzorroAnalysis(
+                status="source_error",
+                risk_flags=[
+                    {
+                        "type": "multiple_prozorro_terminations_found",
+                        "source": "prozorro_analysis",
+                    }
+                ],
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+
+        self.assertEqual(summary.score, 0)
+        self.assertNotIn("multiple_prozorro_terminations_found", [reason["type"] for reason in summary.reasons])
+
+    def test_build_risk_summary_ignores_not_found_prozorro_flags(self):
+        from app.bot import build_risk_summary
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            prozorro_analysis=ProzorroAnalysis(
+                status="not_found",
+                risk_flags=[
+                    {
+                        "type": "multiple_prozorro_terminations_found",
+                        "source": "prozorro_analysis",
+                    }
+                ],
+            ),
+        )
+
+        summary = build_risk_summary(result, None)
+
+        self.assertEqual(summary.score, 0)
+        self.assertNotIn("multiple_prozorro_terminations_found", [reason["type"] for reason in summary.reasons])
+
+    def test_build_sources_snapshot_includes_prozorro_analysis(self):
+        from app.bot import build_sources_snapshot
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+
+        analysis = ProzorroAnalysis(status="found", stats=ProzorroStats(procurements_count=2))
+        result = CompanyLookupResult(status="found", edrpou="12345678", prozorro_analysis=analysis)
+
+        sources = build_sources_snapshot(result, None, None)
+
+        self.assertEqual(sources["prozorro"]["status"], "found")
+        self.assertEqual(sources["prozorro"]["stats"]["procurements_count"], 2)
+
+    def test_found_company_response_shows_prozorro_block_when_analysis_exists(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(short_name='ТОВ "Тест"', edrpou="12345678", status="зареєстровано"),
+            prozorro_analysis=ProzorroAnalysis(
+                status="found",
+                stats=ProzorroStats(
+                    procurements_count=4,
+                    participations_count=4,
+                    wins_count=0,
+                    contracts_count=0,
+                    completed_contracts_count=0,
+                    terminated_contracts_count=0,
+                    disqualifications_count=0,
+                    win_rate_percent=0.0,
+                    last_participation_date="2025-03-10",
+                ),
+                info_notes=[
+                    "Сам факт участі не є ризиком.",
+                    "Перемог у Prozorro не знайдено; score не підвищено.",
+                ],
+                summary="Prozorro: участей 4, перемог 0, договорів 0, розірвань 0.",
+            ),
+        )
+
+        response = build_edrpou_response("12345678", result)
+
+        self.assertIn("Prozorro:", response)
+        self.assertIn("Участей: 4", response)
+        self.assertIn("Перемог: 0", response)
+        self.assertIn("Договорів: 0", response)
+        self.assertIn("Остання участь: 2025-03-10", response)
+        self.assertIn("Сам факт участі не є ризиком", response)
+        self.assertIn("Джерела: Opendatabot, Prozorro", response)
+        self.assertNotIn("Детальна історія закупівель Prozorro ще не підключена", response)
+
+    def test_found_company_response_omits_prozorro_block_when_analysis_missing(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(short_name='ТОВ "Тест"', edrpou="12345678", status="зареєстровано"),
+        )
+
+        response = build_edrpou_response("12345678", result)
+
+        self.assertNotIn("Prozorro:", response)
+        self.assertNotIn("Prozorro", response.split("Джерело: Opendatabot")[-1])
+
+    def test_found_company_response_shows_tender_fallback_when_prozorro_analysis_missing(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            company_data=CompanyData(
+                short_name='ТОВ "Тест"',
+                edrpou="12345678",
+                status="зареєстровано",
+                tenders_count=7,
+                tenders_text="7 тендерів",
+            ),
+        )
+
+        response = build_edrpou_response("12345678", result)
+
+        self.assertIn("Prozorro:", response)
+        self.assertIn("За відкритими даними знайдено участь у тендерах: 7 тендерів.", response)
+        self.assertIn("Детальна історія закупівель Prozorro ще не підключена або не передана.", response)
+        self.assertIn("Score не підвищено.", response)
+        self.assertIn("Джерело: Opendatabot", response)
+        self.assertNotIn("Джерела: Opendatabot, Prozorro", response)
+
     def test_recommendation_text_changes_by_risk_level(self):
         from app.bot import build_recommendation_text
 
@@ -1606,6 +1772,209 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lookup_saw_clarity_started, [True])
         self.assertIn("Джерела: Opendatabot, Clarity", message.answers[1])
 
+    async def test_edrpou_handler_shows_prozorro_from_injected_lookup(self):
+        from app.bot import edrpou_handler
+        from app.models.clarity import ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+
+        message = FakeMessage("12345678", user_id=777)
+        saved_results: list[CompanyLookupResult] = []
+
+        def found_lookup(edrpou: str) -> CompanyLookupResult:
+            return CompanyLookupResult(
+                status="found",
+                edrpou=edrpou,
+                company_data=CompanyData(short_name='ТОВ "ПРОЗОРО"', edrpou=edrpou),
+            )
+
+        def found_clarity_lookup(edrpou: str) -> ClarityData:
+            return ClarityData(source_url=f"https://clarity-project.info/edr/{edrpou}", status="found", edrpou=edrpou)
+
+        def prepared_prozorro_lookup(edrpou: str) -> ProzorroAnalysis:
+            return ProzorroAnalysis(
+                status="found",
+                stats=ProzorroStats(
+                    procurements_count=2,
+                    participations_count=2,
+                    wins_count=1,
+                    contracts_count=1,
+                    terminated_contracts_count=0,
+                    last_participation_date="2026-01-10",
+                ),
+                summary="Prozorro: участей 2, перемог 1, договорів 1, розірвань 0.",
+                info_notes=["Сам факт участі не є ризиком."],
+            )
+
+        await edrpou_handler(
+            message,
+            lookup=found_lookup,
+            clarity_lookup=found_clarity_lookup,
+            youcontrol_lookup=no_youcontrol_lookup,
+            debtors_lookup=no_debtors_lookup,
+            tax_lookup=no_tax_lookup,
+            domain_reputation_lookup=no_domain_reputation_lookup,
+            contacts_lookup=no_contacts_lookup,
+            prozorro_lookup=prepared_prozorro_lookup,
+            save=lambda result, user_id: saved_results.append(result),
+        )
+
+        self.assertIn("Prozorro:", message.answers[1])
+        self.assertIn("Участей: 2", message.answers[1])
+        self.assertIn("Перемог: 1", message.answers[1])
+        self.assertIn("Остання участь: 2026-01-10", message.answers[1])
+        self.assertIn("Джерела: Opendatabot, Clarity, Prozorro", message.answers[1])
+        self.assertEqual(saved_results[0].prozorro_analysis.status, "found")
+
+    async def test_edrpou_handler_keeps_score_when_prozorro_source_errors(self):
+        from app.bot import edrpou_handler
+        from app.models.clarity import ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis
+
+        message = FakeMessage("12345678", user_id=777)
+        saved_results: list[CompanyLookupResult] = []
+
+        def found_lookup(edrpou: str) -> CompanyLookupResult:
+            return CompanyLookupResult(
+                status="found",
+                edrpou=edrpou,
+                company_data=CompanyData(short_name='ТОВ "ПРОЗОРО"', edrpou=edrpou),
+            )
+
+        def found_clarity_lookup(edrpou: str) -> ClarityData:
+            return ClarityData(source_url=f"https://clarity-project.info/edr/{edrpou}", status="found", edrpou=edrpou)
+
+        def failed_prozorro_lookup(edrpou: str) -> ProzorroAnalysis:
+            return ProzorroAnalysis(
+                status="source_error",
+                error="cache_unavailable",
+                risk_flags=[{"type": "multiple_prozorro_terminations_found"}],
+            )
+
+        await edrpou_handler(
+            message,
+            lookup=found_lookup,
+            clarity_lookup=found_clarity_lookup,
+            youcontrol_lookup=no_youcontrol_lookup,
+            debtors_lookup=no_debtors_lookup,
+            tax_lookup=no_tax_lookup,
+            domain_reputation_lookup=no_domain_reputation_lookup,
+            contacts_lookup=no_contacts_lookup,
+            prozorro_lookup=failed_prozorro_lookup,
+            save=lambda result, user_id: saved_results.append(result),
+        )
+
+        self.assertEqual(saved_results[0].risk_summary.score, 0)
+        self.assertNotIn(
+            "multiple_prozorro_terminations_found",
+            [reason["type"] for reason in saved_results[0].risk_summary.reasons],
+        )
+
+    async def test_run_source_lookups_attaches_prozorro_analysis(self):
+        from app.bot import run_source_lookups
+        from app.models.clarity import ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+
+        def found_lookup(edrpou: str) -> CompanyLookupResult:
+            return CompanyLookupResult(
+                status="found",
+                edrpou=edrpou,
+                company_data=CompanyData(short_name='ТОВ "ПРОЗОРО"', edrpou=edrpou),
+            )
+
+        def found_clarity_lookup(edrpou: str) -> ClarityData:
+            return ClarityData(source_url=f"https://clarity-project.info/edr/{edrpou}", status="found", edrpou=edrpou)
+
+        def prepared_prozorro_lookup(edrpou: str) -> ProzorroAnalysis:
+            return ProzorroAnalysis(status="found", stats=ProzorroStats(procurements_count=3))
+
+        result, *_ = await run_source_lookups(
+            "12345678",
+            found_lookup,
+            found_clarity_lookup,
+            no_youcontrol_lookup,
+            no_debtors_lookup,
+            no_tax_lookup,
+            no_domain_reputation_lookup,
+            no_contacts_lookup,
+            analysis_timeout=1,
+            prozorro_lookup=prepared_prozorro_lookup,
+        )
+
+        self.assertEqual(result.prozorro_analysis.status, "found")
+        self.assertEqual(result.prozorro_analysis.stats.procurements_count, 3)
+
+    async def test_edrpou_handler_preserves_positional_save_argument(self):
+        from app.bot import edrpou_handler
+        from app.models.clarity import ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        message = FakeMessage("12345678", user_id=777)
+        saved_results: list[CompanyLookupResult] = []
+
+        def found_lookup(edrpou: str) -> CompanyLookupResult:
+            return CompanyLookupResult(
+                status="found",
+                edrpou=edrpou,
+                company_data=CompanyData(short_name='ТОВ "ПРОЗОРО"', edrpou=edrpou),
+            )
+
+        def found_clarity_lookup(edrpou: str) -> ClarityData:
+            return ClarityData(source_url=f"https://clarity-project.info/edr/{edrpou}", status="found", edrpou=edrpou)
+
+        await edrpou_handler(
+            message,
+            found_lookup,
+            found_clarity_lookup,
+            no_youcontrol_lookup,
+            no_debtors_lookup,
+            no_tax_lookup,
+            no_domain_reputation_lookup,
+            no_contacts_lookup,
+            lambda result, user_id: saved_results.append(result),
+            1,
+        )
+
+        self.assertEqual(len(saved_results), 1)
+        self.assertEqual(saved_results[0].edrpou, "12345678")
+        self.assertIsNotNone(saved_results[0].prozorro_analysis)
+        self.assertEqual(saved_results[0].prozorro_analysis.status, "not_found")
+
+    async def test_debug_handler_preserves_positional_analysis_timeout_argument(self):
+        from app.bot import debug_handler
+        from app.models.clarity import ClarityData
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        message = FakeMessage("/debug 12345678")
+        release_slow_lookup = Event()
+
+        def found_lookup(edrpou: str) -> CompanyLookupResult:
+            release_slow_lookup.wait(0.05)
+            return CompanyLookupResult(
+                status="found",
+                edrpou=edrpou,
+                company_data=CompanyData(short_name='ТОВ "ПРОЗОРО"', edrpou=edrpou),
+            )
+
+        def found_clarity_lookup(edrpou: str) -> ClarityData:
+            return ClarityData(source_url=f"https://clarity-project.info/edr/{edrpou}", status="found", edrpou=edrpou)
+
+        await debug_handler(
+            message,
+            found_lookup,
+            found_clarity_lookup,
+            no_youcontrol_lookup,
+            no_debtors_lookup,
+            no_tax_lookup,
+            no_domain_reputation_lookup,
+            no_contacts_lookup,
+            0.01,
+        )
+        release_slow_lookup.set()
+
+        self.assertEqual(len(message.answers), 1)
+        self.assertIn('"edrpou": "12345678"', message.answers[0])
+        self.assertIn("opendatabot", json.loads(message.answers[0])["sources_unavailable"])
+
     async def test_valid_edrpou_uses_opendatabot_result_when_clarity_times_out(self):
         from app.bot import edrpou_handler
         from app.models.clarity import ClarityData, ClaritySignals, ClarityTax
@@ -2640,6 +3009,38 @@ class EdrpouHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["final_level"], "medium")
         self.assertEqual(payload["risk_flags"][0]["type"], "tax_debt_found")
         self.assertNotEqual(payload["final_level"], "critical")
+
+    def test_debug_payload_lists_prozorro_found_and_partial_sources(self):
+        from app.bot import build_debug_payload, with_source_diagnostics
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis, ProzorroStats
+
+        for status in ("found", "partial"):
+            with self.subTest(status=status):
+                result = CompanyLookupResult(
+                    status="found",
+                    edrpou="12345678",
+                    prozorro_analysis=ProzorroAnalysis(status=status, stats=ProzorroStats(procurements_count=2)),
+                )
+
+                payload = build_debug_payload(with_source_diagnostics(result, None))
+
+                self.assertIn("prozorro", payload["sources_checked"])
+                self.assertNotIn("prozorro", payload["sources_unavailable"])
+
+    def test_debug_payload_lists_unavailable_prozorro_source(self):
+        from app.bot import build_debug_payload, with_source_diagnostics
+        from app.models.company_lookup import CompanyLookupResult, ProzorroAnalysis
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="12345678",
+            prozorro_analysis=ProzorroAnalysis(status="source_error", error="cache_unavailable"),
+        )
+
+        payload = build_debug_payload(with_source_diagnostics(result, None))
+
+        self.assertIn("prozorro", payload["sources_unavailable"])
+        self.assertNotIn("prozorro", payload["sources_checked"])
 
     async def test_debug_handler_returns_exact_raw_court_and_enforcement_counts(self):
         from app.bot import debug_handler

@@ -19,6 +19,7 @@ from app.models.company_lookup import (
     CompanyData,
     CompanyLookupResult,
     FinancialYearData,
+    ProzorroAnalysis,
     RiskFlagSnapshot,
     RiskSummary,
     SourceDiagnostic,
@@ -46,6 +47,7 @@ from app.services.opendatabot_lookup import (
     SOURCE_ERROR,
     lookup_company,
 )
+from app.services.prozorro_lookup import lookup_prepared_prozorro
 from app.services.risk_scoring import RISK_FLAG_ALIASES, calculate_final_risk
 from app.services.tax_lookup import fetch_tax_status
 from app.services.youcontrol_lookup import fetch_youcontrol_company
@@ -257,6 +259,10 @@ def format_found_company(
     financial_lines = build_financial_lines(lookup_result, clarity_data)
     if financial_lines:
         lines.extend(["", "Фінансові дані:", *financial_lines])
+    prozorro_source_included = is_reportable_prozorro_analysis(lookup_result.prozorro_analysis)
+    prozorro_lines = build_prozorro_section_lines(lookup_result)
+    if prozorro_lines:
+        lines.extend(["", "Prozorro:", *prozorro_lines])
     assessment_reason_lines = build_assessment_reason_lines(
         lookup_result,
         final_risk,
@@ -289,6 +295,7 @@ def format_found_company(
                 tax_included=is_successful_tax(tax_data),
                 domain_reputation_included=is_checked_domain_reputation(domain_reputation_data),
                 contacts_summary=contacts_summary,
+                prozorro_included=prozorro_source_included,
             ),
             "Результат має інформаційний характер і не є юридичним висновком.",
         ]
@@ -324,6 +331,7 @@ def format_sources(
     tax_included: bool = False,
     domain_reputation_included: bool = False,
     contacts_summary: dict | None = None,
+    prozorro_included: bool = False,
 ) -> str:
     sources = ["Opendatabot"]
     if clarity_included:
@@ -338,10 +346,71 @@ def format_sources(
         sources.append("перевірка сайту")
     if contacts_summary_has_source(contacts_summary, "prat.ua/pat.ua"):
         sources.append("PAT.UA")
+    if prozorro_included:
+        sources.append("Prozorro")
     sources = dedupe_lines(sources)
     if len(sources) == 1:
         return f"Джерело: {sources[0]}"
     return f"Джерела: {', '.join(sources)}"
+
+
+def is_reportable_prozorro_analysis(prozorro_analysis: ProzorroAnalysis | None) -> bool:
+    return bool(prozorro_analysis and prozorro_analysis.status in {"found", "partial", "source_error"})
+
+
+def build_prozorro_section_lines(lookup_result: CompanyLookupResult) -> list[str]:
+    if is_reportable_prozorro_analysis(lookup_result.prozorro_analysis):
+        return build_prozorro_lines(lookup_result.prozorro_analysis)
+    return build_prozorro_tender_fallback_lines(lookup_result.company_data)
+
+
+def build_prozorro_tender_fallback_lines(company: CompanyData | None) -> list[str]:
+    if company is None:
+        return []
+    tenders_text = format_tenders(company)
+    if not tenders_text:
+        return []
+    return [
+        f"За відкритими даними знайдено участь у тендерах: {tenders_text}.",
+        "Детальна історія закупівель Prozorro ще не підключена або не передана.",
+        "Примітка: сам факт участі у тендерах не є ризиком. Score не підвищено.",
+    ]
+
+
+def build_prozorro_lines(prozorro_analysis: ProzorroAnalysis | None) -> list[str]:
+    if not is_reportable_prozorro_analysis(prozorro_analysis):
+        return []
+
+    stats = prozorro_analysis.stats
+    lines = [
+        f"Закупівель: {stats.procurements_count}",
+        f"Участей: {stats.participations_count}",
+        f"Перемог: {stats.wins_count}",
+        f"Договорів: {stats.contracts_count}",
+        f"Завершених договорів: {stats.completed_contracts_count}",
+        f"Розірваних договорів: {stats.terminated_contracts_count}",
+        f"Дискваліфікацій: {stats.disqualifications_count}",
+    ]
+    lines.extend(optional_percent_field("Частка перемог", stats.win_rate_percent))
+    lines.extend(optional_percent_field("Частка розірвань", stats.termination_rate_percent))
+    lines.extend(optional_percent_field("Частка дискваліфікацій", stats.disqualification_rate_percent))
+    lines.extend(optional_field("Остання участь", stats.last_participation_date))
+    lines.extend(optional_field("Остання перемога", stats.last_win_date))
+    if prozorro_analysis.summary:
+        lines.append(prozorro_analysis.summary)
+    for note in prozorro_analysis.info_notes:
+        lines.append(f"Примітка: {note}")
+    if prozorro_analysis.status == "partial":
+        lines.append("Примітка: дані Prozorro часткові; варто перевірити їх вручну.")
+    if prozorro_analysis.status == "source_error":
+        lines.append("Примітка: дані Prozorro недоступні; варто перевірити їх вручну.")
+    return lines
+
+
+def optional_percent_field(label: str, value: float | None) -> list[str]:
+    if value is None:
+        return []
+    return [f"{label}: {value:.1f}%"]
 
 
 def format_user_risk_line(final_risk: dict) -> str:
@@ -1303,21 +1372,26 @@ async def run_source_lookups(
     contacts_lookup: Callable[[str, dict | None], dict | None] = fetch_company_contacts_async,
     website_url: str | None = None,
     analysis_timeout: float = ANALYSIS_TIMEOUT_SECONDS,
+    prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
 ) -> tuple[CompanyLookupResult, ClarityData | None, dict | None, dict | None, dict | None, dict | None, dict | None]:
     lookup_task = asyncio.create_task(asyncio.to_thread(lookup, edrpou))
     clarity_task = asyncio.create_task(asyncio.to_thread(clarity_lookup, edrpou))
     youcontrol_task = asyncio.create_task(asyncio.to_thread(youcontrol_lookup, edrpou))
     debtors_task = asyncio.create_task(asyncio.to_thread(debtors_lookup, edrpou))
     tax_task = asyncio.create_task(asyncio.to_thread(tax_lookup, edrpou))
-    await asyncio.wait({lookup_task, clarity_task, youcontrol_task, debtors_task, tax_task}, timeout=analysis_timeout)
+    prozorro_task = asyncio.create_task(asyncio.to_thread(prozorro_lookup, edrpou))
+    first_batch_tasks = {lookup_task, clarity_task, youcontrol_task, debtors_task, tax_task, prozorro_task}
+    await asyncio.wait(first_batch_tasks, timeout=analysis_timeout)
 
     result = completed_lookup_result(lookup_task, edrpou)
     clarity_data = completed_clarity_result(clarity_task, edrpou)
     youcontrol_data = completed_youcontrol_result(youcontrol_task, edrpou)
     debtors_registry_data = completed_debtors_result(debtors_task, edrpou)
     tax_data = completed_tax_result(tax_task, edrpou)
+    prozorro_analysis = completed_prozorro_result(prozorro_task, edrpou)
+    result = result.model_copy(update={"prozorro_analysis": prozorro_analysis})
 
-    for task in (lookup_task, clarity_task, youcontrol_task, debtors_task, tax_task):
+    for task in first_batch_tasks:
         if not task.done():
             task.cancel()
 
@@ -1400,6 +1474,19 @@ def completed_tax_result(
     except Exception:
         logging.exception("Tax lookup failed for EDRPOU %s", edrpou)
         return tax_source_error_result(edrpou, "lookup_failed")
+
+
+def completed_prozorro_result(
+    task: asyncio.Task[ProzorroAnalysis],
+    edrpou: str,
+) -> ProzorroAnalysis:
+    if task.cancelled() or not task.done():
+        return ProzorroAnalysis(status="source_error", error="analysis_timeout")
+    try:
+        return task.result()
+    except Exception:
+        logging.exception("Prozorro lookup failed for EDRPOU %s", edrpou)
+        return ProzorroAnalysis(status="source_error", error="lookup_failed")
 
 
 def completed_domain_reputation_result(
@@ -1800,6 +1887,14 @@ def collect_source_risk_flags(
             and "website_source_unavailable" not in domain_reputation_data.get("risk_flags", [])
         ):
             flags.append({"type": "website_source_unavailable", "source": "domain_reputation"})
+    prozorro_analysis = result.prozorro_analysis
+    if prozorro_analysis and prozorro_analysis.status in {"found", "partial"}:
+        for flag in prozorro_analysis.risk_flags:
+            prepared_flag = dict(flag)
+            prepared_flag.setdefault("source", "prozorro_analysis")
+            prepared_flag.setdefault("status", "found")
+            prepared_flag.setdefault("confidence", "medium")
+            flags.append(prepared_flag)
     flags.extend(collect_company_status_risk_flags(result, clarity_data, youcontrol_data))
     flags.extend(collect_company_status_mismatch_flags(result, clarity_data, youcontrol_data))
     flags.extend(collect_low_capital_debt_flags(result, flags))
@@ -2231,6 +2326,7 @@ def build_sources_snapshot(
     sources["debtors_registry"] = debtors_registry_data
     sources["tax"] = tax_data
     sources["domain_reputation"] = domain_reputation_data
+    sources["prozorro"] = result.prozorro_analysis.model_dump(mode="json") if result.prozorro_analysis else None
     sources["contacts_summary"] = contacts_summary
     sources["contact_sources"] = (contacts_summary or {}).get("source_results") if contacts_summary else None
     sources["court_analysis"] = {
@@ -2456,6 +2552,7 @@ async def debug_handler(
     domain_reputation_lookup: Callable[[str | None, dict | None], dict | None] = fetch_domain_reputation,
     contacts_lookup: Callable[[str, dict | None], dict | None] = fetch_company_contacts_async,
     analysis_timeout: float = ANALYSIS_TIMEOUT_SECONDS,
+    prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
 ) -> None:
     edrpou = extract_debug_edrpou(message.text or "")
     if not edrpou:
@@ -2471,8 +2568,9 @@ async def debug_handler(
         tax_lookup,
         domain_reputation_lookup,
         contacts_lookup,
-        None,
-        analysis_timeout,
+        website_url=None,
+        analysis_timeout=analysis_timeout,
+        prozorro_lookup=prozorro_lookup,
     )
     enriched = with_source_diagnostics(
         result,
@@ -2559,6 +2657,9 @@ def checked_sources(sources: dict) -> list[str]:
     domain_reputation = sources.get("domain_reputation") or {}
     if domain_reputation and domain_reputation.get("checked"):
         checked.append("domain_reputation")
+    prozorro = sources.get("prozorro") or {}
+    if prozorro and prozorro.get("status") in {"found", "partial"}:
+        checked.append("prozorro")
     if sources.get("contacts_summary"):
         checked.append("contacts_summary")
     if sources.get("court_analysis"):
@@ -2586,6 +2687,9 @@ def unavailable_sources(sources: dict) -> list[str]:
     domain_reputation = sources.get("domain_reputation") or {}
     if domain_reputation and domain_reputation.get("error") == "website_source_unavailable":
         unavailable.append("domain_reputation")
+    prozorro = sources.get("prozorro") or {}
+    if prozorro and prozorro.get("status") == "source_error":
+        unavailable.append("prozorro")
     return unavailable
 
 
@@ -2600,6 +2704,7 @@ async def edrpou_handler(
     contacts_lookup: Callable[[str, dict | None], dict | None] = fetch_company_contacts_async,
     save: Callable[[CompanyLookupResult, int | None], object] = save_check_result,
     analysis_timeout: float = ANALYSIS_TIMEOUT_SECONDS,
+    prozorro_lookup: Callable[[str], ProzorroAnalysis] = lookup_prepared_prozorro,
 ) -> None:
     text = message.text or ""
     edrpou, website_url = parse_edrpou_query(text)
@@ -2617,8 +2722,9 @@ async def edrpou_handler(
         tax_lookup,
         domain_reputation_lookup,
         contacts_lookup,
-        website_url,
-        analysis_timeout,
+        website_url=website_url,
+        analysis_timeout=analysis_timeout,
+        prozorro_lookup=prozorro_lookup,
     )
     user_id = getattr(getattr(message, "from_user", None), "id", None)
     try:
