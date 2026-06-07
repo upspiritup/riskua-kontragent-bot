@@ -105,6 +105,28 @@ class ProzorroAnalysisTests(unittest.TestCase):
 
         self.assertFlagTypes(analysis, ["prozorro_termination_found"])
 
+    def test_terminated_contract_without_has_contract_adds_termination_risk(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        analysis = analyze_prozorro_data(
+            [
+                {
+                    "id": "UA-TERM-1",
+                    "participated": True,
+                    "won": True,
+                    "contract_terminated": True,
+                    "termination_reason": "Contract terminated by agreement.",
+                },
+                {"id": "UA-OK-1", "participated": True, "won": True, "has_contract": True},
+                {"id": "UA-OK-2", "participated": True, "won": True, "has_contract": True},
+                {"id": "UA-OK-3", "participated": True, "won": True, "has_contract": True},
+            ]
+        )
+
+        self.assertEqual(analysis.stats.contracts_count, 4)
+        self.assertEqual(analysis.stats.terminated_contracts_count, 1)
+        self.assertFlagTypes(analysis, ["prozorro_termination_found"])
+
     def test_two_terminated_contracts_add_multiple_terminations_risk(self):
         from app.services.prozorro_analysis import analyze_prozorro_data
 
@@ -154,6 +176,30 @@ class ProzorroAnalysisTests(unittest.TestCase):
                     "has_contract": True,
                     "contract_completed": True,
                 },
+                {"id": "UA-OK-2", "participated": True, "won": True, "has_contract": True},
+                {"id": "UA-OK-3", "participated": True, "won": True, "has_contract": True},
+            ]
+        )
+
+        self.assertFlagTypes(
+            analysis,
+            ["prozorro_termination_found", "contract_nonperformance_case"],
+        )
+
+    def test_quality_related_termination_reason_adds_nonperformance_risk(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        analysis = analyze_prozorro_data(
+            [
+                {
+                    "id": "UA-TERM-1",
+                    "participated": True,
+                    "won": True,
+                    "has_contract": True,
+                    "contract_terminated": True,
+                    "termination_reason": "неналежна якість поставки",
+                },
+                {"id": "UA-OK-1", "participated": True, "won": True, "has_contract": True},
                 {"id": "UA-OK-2", "participated": True, "won": True, "has_contract": True},
                 {"id": "UA-OK-3", "participated": True, "won": True, "has_contract": True},
             ]

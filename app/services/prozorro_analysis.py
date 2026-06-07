@@ -12,9 +12,13 @@ NONPERFORMANCE_MARKERS = [
     "deadline breach",
     "failed to supply",
     "nonperformance",
+    "poor quality",
+    "quality",
     "\u0432\u0456\u0434\u043c\u043e\u0432\u0430 \u0432\u0456\u0434 \u043f\u043e\u0441\u0442\u0430\u0447\u0430\u043d\u043d\u044f",
     "\u043f\u043e\u0440\u0443\u0448\u0435\u043d\u043d\u044f \u0441\u0442\u0440\u043e\u043a",
     "\u043d\u0435\u0432\u0438\u043a\u043e\u043d\u0430\u043d\u043d\u044f",
+    "\u043d\u0435\u043d\u0430\u043b\u0435\u0436\u043d\u0430 \u044f\u043a\u0456\u0441\u0442\u044c",
+    "\u044f\u043a\u0456\u0441\u0442\u044c \u043f\u043e\u0441\u0442\u0430\u0432\u043a\u0438",
 ]
 DISQUALIFICATION_REASON_FLAGS = {
     "large_tax_debt_found": [
@@ -106,7 +110,7 @@ def analyze_prozorro_data(
 
 def build_risk_flags(procurements: list[ProzorroProcurement], stats: ProzorroStats) -> list[dict[str, Any]]:
     flags: list[dict[str, Any]] = []
-    terminated = [item for item in procurements if item.has_contract and item.contract_terminated]
+    terminated = [item for item in procurements if item.contract_terminated]
     disqualified = [item for item in procurements if item.disqualified]
 
     if terminated:
@@ -257,7 +261,7 @@ def normalize_procurement_dict(item: dict[str, Any]) -> ProzorroProcurement:
 def calculate_stats(procurements: list[ProzorroProcurement]) -> ProzorroStats:
     participations = [item for item in procurements if item.participated]
     wins = [item for item in procurements if item.won]
-    contracts = [item for item in procurements if item.has_contract]
+    contracts = [item for item in procurements if item.has_contract or item.contract_terminated]
     terminated = [item for item in contracts if item.contract_terminated]
     disqualified = [item for item in procurements if item.disqualified]
     participation_dates = sorted(date for item in participations if (date := item.date or item.award_date or item.contract_date))
