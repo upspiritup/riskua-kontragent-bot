@@ -210,6 +210,27 @@ class ProzorroAnalysisTests(unittest.TestCase):
             ["prozorro_termination_found", "contract_nonperformance_case"],
         )
 
+    def test_neutral_quality_requirement_change_does_not_add_nonperformance_risk(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        analysis = analyze_prozorro_data(
+            [
+                {
+                    "id": "UA-TERM-1",
+                    "participated": True,
+                    "won": True,
+                    "has_contract": True,
+                    "contract_terminated": True,
+                    "termination_reason": "contract terminated due to changed quality requirements",
+                },
+                {"id": "UA-OK-1", "participated": True, "won": True, "has_contract": True},
+                {"id": "UA-OK-2", "participated": True, "won": True, "has_contract": True},
+                {"id": "UA-OK-3", "participated": True, "won": True, "has_contract": True},
+            ]
+        )
+
+        self.assertFlagTypes(analysis, ["prozorro_termination_found"])
+
     def test_frequent_disqualifications_are_flagged_by_count_or_rate(self):
         from app.services.prozorro_analysis import analyze_prozorro_data
 
