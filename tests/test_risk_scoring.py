@@ -215,6 +215,7 @@ class RiskScoringTests(unittest.TestCase):
             [
                 {"type": "multiple_prozorro_terminations_found", "source": "prozorro_analysis"},
                 {"type": "frequent_prozorro_disqualifications", "source": "prozorro_analysis"},
+                {"type": "supplier_disqualified", "source": "prozorro_analysis"},
                 {"type": "single_buyer_concentration", "source": "prozorro_analysis"},
             ]
         )
@@ -224,10 +225,11 @@ class RiskScoringTests(unittest.TestCase):
             [
                 "multiple_prozorro_terminations_found",
                 "frequent_prozorro_disqualifications",
+                "supplier_disqualified",
                 "single_buyer_concentration",
             ],
         )
-        self.assertEqual([reason["weight"] for reason in result["reasons"]], [35, 20, 15])
+        self.assertEqual([reason["weight"] for reason in result["reasons"]], [35, 20, 10, 15])
         self.assertEqual(result["score"], 65)
 
     def test_prozorro_duplicate_existing_flag_counts_once(self):

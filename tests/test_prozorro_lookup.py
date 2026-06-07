@@ -38,6 +38,59 @@ class ProzorroLookupTests(unittest.TestCase):
         self.assertEqual(result.stats.terminated_contracts_count, 1)
         self.assertEqual([flag["type"] for flag in result.risk_flags], ["prozorro_termination_found"])
 
+    def test_lookup_uses_live_source_after_cache_miss(self):
+        from app.models.company_lookup import ProzorroProcurement
+        from app.services.prozorro_lookup import lookup_prepared_prozorro
+
+        result = lookup_prepared_prozorro(
+            "12345678",
+            source=lambda edrpou: None,
+            live_source=lambda edrpou: [
+                ProzorroProcurement(
+                    procurement_id="UA-LIVE-1",
+                    participated=True,
+                    won=True,
+                    has_contract=True,
+                    date="2026-01-01",
+                )
+            ],
+        )
+
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.stats.procurements_count, 1)
+        self.assertEqual(result.stats.participations_count, 1)
+        self.assertEqual(result.stats.wins_count, 1)
+        self.assertEqual(result.stats.contracts_count, 1)
+
+    def test_lookup_returns_not_found_when_live_source_has_no_records(self):
+        from app.services.prozorro_lookup import lookup_prepared_prozorro
+
+        result = lookup_prepared_prozorro(
+            "12345678",
+            source=lambda edrpou: None,
+            live_source=lambda edrpou: [],
+        )
+
+        self.assertEqual(result.status, "not_found")
+        self.assertEqual(result.stats.procurements_count, 0)
+        self.assertEqual(result.risk_flags, [])
+
+    def test_lookup_converts_live_source_exception_to_source_error(self):
+        from app.services.prozorro_lookup import lookup_prepared_prozorro
+
+        def failing_live_source(edrpou: str):
+            raise TimeoutError("prozorro timeout")
+
+        result = lookup_prepared_prozorro(
+            "12345678",
+            source=lambda edrpou: None,
+            live_source=failing_live_source,
+        )
+
+        self.assertEqual(result.status, "source_error")
+        self.assertIn("prozorro timeout", result.error or "")
+        self.assertEqual(result.risk_flags, [])
+
     def test_lookup_converts_source_exception_to_source_error(self):
         from app.services.prozorro_lookup import lookup_prepared_prozorro
 

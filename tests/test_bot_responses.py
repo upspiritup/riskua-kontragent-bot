@@ -185,6 +185,7 @@ class BotResponseTests(unittest.TestCase):
         self.assertIn("Остання участь: 2025-03-10", response)
         self.assertIn("Сам факт участі не є ризиком", response)
         self.assertIn("Джерела: Opendatabot, Prozorro", response)
+        self.assertNotIn("Детальна історія закупівель Prozorro ще не підключена", response)
 
     def test_found_company_response_omits_prozorro_block_when_analysis_missing(self):
         from app.bot import build_edrpou_response

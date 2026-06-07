@@ -199,6 +199,11 @@ RISK_FLAG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "label_uk": "Часті відхилення в Prozorro",
         "description": "Компанію часто відхиляли в закупівлях або частка відхилень є високою.",
     },
+    "supplier_disqualified": {
+        "weight": 10,
+        "label_uk": "Відхилення постачальника в Prozorro",
+        "description": "У Prozorro знайдено факт відхилення пропозиції або неуспішного аварду постачальника.",
+    },
     "problematic_documents_found": {
         "weight": 35,
         "label_uk": "Проблемні/недостовірні документи",

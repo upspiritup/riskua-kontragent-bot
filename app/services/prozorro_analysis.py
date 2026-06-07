@@ -198,6 +198,7 @@ def build_risk_flags(
             )
         )
 
+    disqualification_reason_flags_found = False
     for item in disqualified:
         reason = item.disqualification_reason or ""
         for flag_type, markers in DISQUALIFICATION_REASON_FLAGS.items():
@@ -208,6 +209,16 @@ def build_risk_flags(
             marker = text_has_marker(reason, markers)
             if marker:
                 flags.append(risk_flag(flag_type, reason, marker))
+                disqualification_reason_flags_found = True
+
+    if disqualified and not disqualification_reason_flags_found:
+        flags.append(
+            risk_flag(
+                "supplier_disqualified",
+                disqualified[0].disqualification_reason or disqualified[0].procurement_id or "supplier disqualified",
+                "disqualified_award_or_bid",
+            )
+        )
 
     if stats.contracts_count >= 5 and (
         (stats.single_buyer_contract_share_percent or 0) >= 80

@@ -279,6 +279,7 @@ class ProzorroAnalysisTests(unittest.TestCase):
             [{"id": "UA-DQ-1", "participated": True, "disqualified": True}]
         )
 
+        self.assertIn("supplier_disqualified", self.flag_types(analysis))
         self.assertNotIn("frequent_prozorro_disqualifications", self.flag_types(analysis))
 
     def test_disqualification_reasons_map_to_risk_flags(self):
