@@ -452,6 +452,9 @@ def normalize_procurements(data: Any) -> tuple[list[ProzorroProcurement], list[s
 
 
 def normalize_procurement_dict(item: dict[str, Any]) -> ProzorroProcurement:
+    has_contract = first_bool(item, "has_contract")
+    contract_terminated = first_bool(item, "contract_terminated")
+    contract_value = first_float(item, "contract_value_uah", "contract_value", "award_value")
     return ProzorroProcurement(
         procurement_id=first_text(item, "procurement_id", "id", "tender_id"),
         url=first_text(item, "url", "link"),
@@ -462,17 +465,17 @@ def normalize_procurement_dict(item: dict[str, Any]) -> ProzorroProcurement:
         status=first_text(item, "status"),
         expected_value_uah=first_float(item, "expected_value_uah", "expected_value", "value"),
         bid_value_uah=first_float(item, "bid_value_uah", "bid_value", "proposal_value"),
-        contract_value_uah=first_float(item, "contract_value_uah", "contract_value", "award_value"),
+        contract_value_uah=contract_value,
         buyer_name=first_text(item, "buyer_name", "procuring_entity", "buyer"),
         buyer_edrpou=first_text(item, "buyer_edrpou", "buyer_identifier", "buyer_code"),
         participants_count=first_int(item, "participants_count", "number_of_bids"),
         participated=first_bool(item, "participated"),
-        won=first_bool(item, "won"),
+        won=first_bool(item, "won") or has_contract or contract_value is not None,
         disqualified=first_bool(item, "disqualified"),
         disqualification_reason=first_text(item, "disqualification_reason", "rejection_reason"),
-        has_contract=first_bool(item, "has_contract"),
+        has_contract=has_contract,
         contract_completed=first_bool(item, "contract_completed"),
-        contract_terminated=first_bool(item, "contract_terminated"),
+        contract_terminated=contract_terminated,
         termination_reason=first_text(item, "termination_reason"),
         complaints_count=first_int(item, "complaints_count") or 0,
         supplier_related_complaints_count=first_int(item, "supplier_related_complaints_count") or 0,

@@ -358,6 +358,24 @@ class ProzorroAnalysisTests(unittest.TestCase):
 
         self.assertIn("low_competition_wins", self.flag_types(analysis))
 
+    def test_low_competition_wins_are_inferred_from_contracts(self):
+        from app.services.prozorro_analysis import analyze_prozorro_data
+
+        analysis = analyze_prozorro_data(
+            [
+                {
+                    "id": f"UA-CONTRACT-WIN-{index}",
+                    "has_contract": True,
+                    "participants_count": 1,
+                }
+                for index in range(5)
+            ]
+        )
+
+        self.assertEqual(analysis.stats.wins_count, 5)
+        self.assertEqual(analysis.stats.low_competition_wins_count, 5)
+        self.assertIn("low_competition_wins", self.flag_types(analysis))
+
     def test_frequent_amendments_and_substantial_amount_increase_add_risks(self):
         from app.services.prozorro_analysis import analyze_prozorro_data
 
