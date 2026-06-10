@@ -630,6 +630,8 @@ class RiskScoringTests(unittest.TestCase):
         self.assertEqual(result["level"], "low")
         self.assertEqual(result["reasons"][0]["type"], "prozorro_sale_debtor_mention")
         self.assertEqual(result["reasons"][0]["weight"], 0)
+        self.assertIn("лотах, пов’язаних із дебіторською заборгованістю", result["reasons"][0]["description"])
+        self.assertNotIn("банкрутство самої компанії", result["reasons"][0]["description"])
 
     def test_prozorro_sale_unsuccessful_auction_without_company_fault_is_informational(self):
         from app.services.risk_scoring import calculate_final_risk

@@ -1,5 +1,7 @@
 from pathlib import Path
+import os
 import unittest
+from unittest.mock import patch
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -16,6 +18,60 @@ class DebtorsLookupTests(unittest.TestCase):
             build_debtors_result_url(),
             "https://erb.minjust.gov.ua/#/search-debtors",
         )
+
+    def test_debtors_browser_launch_options_default_to_headless_chromium(self):
+        from app.services.debtors_lookup import build_browser_launch_options
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(build_browser_launch_options(), {"headless": True})
+
+    def test_debtors_browser_launch_options_support_edge_headed_mode(self):
+        from app.services.debtors_lookup import build_browser_launch_options
+
+        with patch.dict(
+            os.environ,
+            {
+                "RISKUA_DEBTORS_BROWSER_CHANNEL": "msedge",
+                "RISKUA_DEBTORS_BROWSER_HEADLESS": "false",
+            },
+        ):
+            self.assertEqual(
+                build_browser_launch_options(),
+                {
+                    "channel": "msedge",
+                    "headless": False,
+                    "args": ["--start-minimized"],
+                },
+            )
+
+    def test_wait_for_networkidle_if_possible_does_not_fail_lookup_on_timeout(self):
+        from app.services.debtors_lookup import wait_for_networkidle_if_possible
+
+        class FakeTimeoutError(Exception):
+            pass
+
+        class FakePage:
+            def wait_for_load_state(self, state: str, timeout: int) -> None:
+                raise FakeTimeoutError("network stays active")
+
+        self.assertFalse(wait_for_networkidle_if_possible(FakePage(), FakeTimeoutError))
+
+    def test_visible_html_has_captcha_ignores_script_mentions(self):
+        from app.services.debtors_lookup import visible_html_has_captcha
+
+        html = """
+        <html>
+          <body>Єдиний реєстр боржників</body>
+          <script>window.captchaToken = "technical-marker";</script>
+        </html>
+        """
+
+        self.assertFalse(visible_html_has_captcha(html))
+
+    def test_visible_html_has_captcha_detects_visible_security_check(self):
+        from app.services.debtors_lookup import visible_html_has_captcha
+
+        self.assertTrue(visible_html_has_captcha("<body>Перевірка безпеки</body>"))
 
     def test_fetch_debtors_registry_uses_mock_fetcher_and_parses_results(self):
         from app.services.debtors_lookup import fetch_debtors_registry
@@ -58,6 +114,50 @@ class DebtorsLookupTests(unittest.TestCase):
         self.assertEqual(result["items_count"], 0)
         self.assertEqual(result["items"], [])
         self.assertEqual(result["signals"], [])
+        self.assertEqual(result["risk_flags"], [])
+        self.assertIsNone(result["error"])
+
+    def test_parse_debtors_results_ignores_header_rows_when_registry_returns_empty_tables(self):
+        from app.services.debtors_lookup import parse_debtors_results
+
+        html = """
+        <table>
+          <tr>
+            <td>Результат пошуку фізичних осіб. Дата та час пошуку:</td>
+          </tr>
+          <tr>
+            <th>Прізвище, ім’я, по батькові</th>
+            <th>Дата народження</th>
+            <th>Документ виданий</th>
+            <th>Номер ВП</th>
+            <th>Категорія стягнення</th>
+          </tr>
+          <tr>
+            <td>Записів не знайдено. Уточніть умови пошуку.</td>
+          </tr>
+        </table>
+        <table>
+          <tr>
+            <td>Результат пошуку юридичних осіб. Дата та час пошуку: 10.06.2026 13:23</td>
+          </tr>
+          <tr>
+            <th>Найменування</th>
+            <th>Документ виданий</th>
+            <th>Номер виконавчого провадження</th>
+            <th>Категорія стягнення</th>
+          </tr>
+          <tr>
+            <td>Записів не знайдено. Уточніть умови пошуку.</td>
+          </tr>
+        </table>
+        """
+
+        result = parse_debtors_results(html, "45549459")
+
+        self.assertTrue(result["checked"])
+        self.assertFalse(result["found"])
+        self.assertEqual(result["items_count"], 0)
+        self.assertEqual(result["items"], [])
         self.assertEqual(result["risk_flags"], [])
         self.assertIsNone(result["error"])
 
@@ -124,6 +224,49 @@ class DebtorsLookupTests(unittest.TestCase):
 
         self.assertIn("tax_debt_enforcement_found", flags)
         self.assertIn("debt_collection_found", flags)
+
+    def test_parse_debtors_results_classifies_33000657_budget_and_court_fee_cases(self):
+        from app.services.debtors_lookup import parse_debtors_results
+
+        html = """
+        <table>
+          <tr>
+            <th>Найменування</th>
+            <th>Документ видав</th>
+            <th>Номер виконавчого провадження</th>
+            <th>Категорія стягнення</th>
+            <th>Деталі виконавця</th>
+          </tr>
+          <tr>
+            <td>ТОВ «ПРИКЛАД»</td>
+            <td>державний виконавець</td>
+            <td>12345001</td>
+            <td>інші стягнення на користь державного бюджету (санкції, платежі, штрафи)</td>
+            <td></td>
+          </tr>
+          <tr>
+            <td>ТОВ «ПРИКЛАД»</td>
+            <td>суд загальної юрисдикції</td>
+            <td>12345002</td>
+            <td>стягнення судового збору</td>
+            <td></td>
+          </tr>
+        </table>
+        """
+
+        result = parse_debtors_results(html, "33000657")
+
+        self.assertTrue(result["checked"])
+        self.assertTrue(result["found"])
+        self.assertEqual(result["items_count"], 2)
+        self.assertEqual(result["proceeding_numbers"], ["12345001", "12345002"])
+        self.assertIn("debtor_registry_found", result["risk_flags"])
+        self.assertIn("debt_collection_found", result["risk_flags"])
+        self.assertIn("fine_or_penalty_enforcement_found", result["risk_flags"])
+        self.assertIn("court_fee_enforcement_found", result["risk_flags"])
+        self.assertIn("Є стягнення коштів, заборгованості або платежів до бюджету", result["signals"])
+        self.assertIn("Є стягнення штрафів, пені або санкцій", result["signals"])
+        self.assertIn("Є стягнення судового збору", result["signals"])
 
 
 if __name__ == "__main__":

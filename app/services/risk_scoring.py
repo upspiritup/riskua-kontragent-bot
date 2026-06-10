@@ -406,7 +406,7 @@ RISK_FLAG_DEFINITIONS: dict[str, dict[str, Any]] = {
     "prozorro_sale_debtor_mention": {
         "weight": 0,
         "label_uk": "Інформаційна згадка в Prozorro.Sale",
-        "description": "Компанія згадується у складі дебіторської заборгованості банкрута. Це не означає банкрутство самої компанії.",
+        "description": "Компанія згадується у лотах, пов’язаних із дебіторською заборгованістю. Цей сигнал сам по собі не доводить банкрутство.",
     },
     "prozorro_sale_informational_auction_mention": {
         "weight": 0,
@@ -488,6 +488,7 @@ HARD_FACT_TYPES = {
     "tax_debt_enforcement_found",
     "salary_debt_enforcement_found",
     "debt_collection_found",
+    "fine_or_penalty_enforcement_found",
     "prozorro_sale_failed_obligations",
     "prozorro_sale_refusal_to_sign",
     "prozorro_sale_disqualified_winner",
@@ -508,6 +509,7 @@ SUPPORTING_CRITICAL_FACT_TYPES = {
     "tax_debt_enforcement_found",
     "salary_debt_enforcement_found",
     "debt_collection_found",
+    "fine_or_penalty_enforcement_found",
     "large_tax_debt_found",
     "severe_negative_equity",
     "negative_equity_multiple_years",
@@ -550,6 +552,7 @@ SIGNIFICANT_DEBT_OR_ENFORCEMENT_TYPES = {
     "tax_debt_enforcement_found",
     "salary_debt_enforcement_found",
     "debt_collection_found",
+    "fine_or_penalty_enforcement_found",
 }
 SIGNIFICANT_DEBT_REDUCER_FLOOR = 50
 STRONG_FINANCIAL_PROFILE_REDUCER = 8

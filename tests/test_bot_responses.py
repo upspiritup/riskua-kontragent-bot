@@ -54,6 +54,87 @@ def no_contacts_lookup(edrpou: str, company_context: dict | None = None) -> dict
 
 
 class BotResponseTests(unittest.TestCase):
+    def test_start_handler_sends_intro_and_pricing_text(self):
+        import asyncio
+
+        from app.bot import start_handler
+
+        message = FakeMessage("/start")
+
+        asyncio.run(start_handler(message))
+
+        self.assertIn("RiskUA — швидка перевірка контрагента 🔎", message.answers[0])
+        self.assertNotIn("Приклад: 12345678", message.answers[0])
+        self.assertIn("У демо ви отримаєте:", message.answers[0])
+        self.assertIn("💳 Повна перевірка", message.answers[0])
+        self.assertIn("✅ рекомендацію: чи варто співпрацювати", message.answers[0])
+        self.assertIn("🎁 Демо-перевірка — безкоштовно", message.answers[0])
+        self.assertIn("🔎 1 повна перевірка — 29 грн", message.answers[0])
+        self.assertIn("📦 10 повних перевірок — 199 грн", message.answers[0])
+        self.assertIn("Надішліть ЄДРПОУ, щоб почати 👇", message.answers[0])
+        self.assertNotIn("Перевіряйте контрагентів перед оплатою", message.answers[0])
+        self.assertNotIn("Просто надішліть код ЄДРПОУ", message.answers[0])
+
+    def test_main_keyboard_includes_admin_contact_button(self):
+        from app.bot import CONTACT_ADMIN_BUTTON_TEXT, build_main_keyboard
+
+        keyboard = build_main_keyboard()
+        button_texts = [button.text for row in keyboard.keyboard for button in row]
+
+        self.assertEqual(CONTACT_ADMIN_BUTTON_TEXT, "📩 Написати адміністратору")
+        self.assertIn(CONTACT_ADMIN_BUTTON_TEXT, button_texts)
+
+    def test_main_keyboard_includes_payment_button(self):
+        from app.bot import PAYMENT_BUTTON_TEXT, build_main_keyboard
+
+        keyboard = build_main_keyboard()
+        button_texts = [button.text for row in keyboard.keyboard for button in row]
+
+        self.assertIn(PAYMENT_BUTTON_TEXT, button_texts)
+
+    def test_contact_admin_handler_sends_telegram_account(self):
+        import asyncio
+
+        from app.bot import ADMIN_TELEGRAM_URL, CONTACT_ADMIN_TEXT, contact_admin_handler
+
+        message = FakeMessage("📩 Написати адміністратору")
+
+        asyncio.run(contact_admin_handler(message))
+
+        self.assertEqual(message.answers, [CONTACT_ADMIN_TEXT])
+        self.assertIn("reng_363", CONTACT_ADMIN_TEXT)
+        self.assertIn(ADMIN_TELEGRAM_URL, CONTACT_ADMIN_TEXT)
+
+    def test_payment_handler_sends_stub_package_choices(self):
+        import asyncio
+
+        from app.bot import PAYMENT_STUB_TEXT, payment_handler
+
+        message = FakeMessage("Оплатити")
+
+        asyncio.run(payment_handler(message))
+
+        self.assertEqual(message.answers, [PAYMENT_STUB_TEXT])
+        self.assertEqual(
+            PAYMENT_STUB_TEXT,
+            "💳 Оберіть пакет перевірок\n\n"
+            "🔎 1 повна перевірка — 29 грн\n"
+            "📦 10 повних перевірок — 199 грн\n\n"
+            "✅ Що входить у повну перевірку:\n\n"
+            "🏢 Реєстраційні дані компанії\n"
+            "👤 Керівник, адреса, статус та КВЕД\n"
+            "💰 Фінансові показники\n"
+            "☎️ Контактна інформація\n"
+            "📈 Динаміка статутного капіталу\n"
+            "🏛 Перевірка Prozorro\n"
+            "⚖️ Судові та ризикові сигнали\n"
+            "🚨 Ознаки банкрутства, припинення або боргів\n"
+            "🧩 Причини оцінки ризику\n"
+            "🤖 AI-висновок щодо співпраці\n"
+            "📊 Загальний ризик від 0 до 100\n\n"
+            "Оберіть пакет нижче 👇",
+        )
+
     def test_highest_risk_level_uses_strongest_known_level(self):
         from app.bot import highest_risk_level
 
@@ -960,7 +1041,7 @@ class BotResponseTests(unittest.TestCase):
         self.assertNotIn("Фінансова звітність показує, що зобов’язання перевищують активи.", reason_block)
         self.assertNotIn("Компанія має збиток і від’ємний власний капітал.", reason_block)
         self.assertNotIn("У Prozorro.Sale знайдено підтверджений продаж майна", reason_block)
-        self.assertIn("Знайдено згадки або записи, пов'язані з банкрутством.", reason_block)
+        self.assertIn("Банкрутний ризик підтверджено", reason_block)
         self.assertNotIn("✅ Компанія працює тривалий час.", response)
         self.assertIn("Загальний ризик: критичний", response)
 
@@ -1047,13 +1128,64 @@ class BotResponseTests(unittest.TestCase):
 
         self.assertIn("Prozorro.Sale:", response)
         self.assertIn(
-            "Prozorro.Sale: компанія згадується у складі дебіторської заборгованості банкрута. Це не означає банкрутство самої компанії.",
+            "Компанія також згадується у лотах, пов’язаних із дебіторською заборгованістю.",
             response,
         )
+        self.assertIn("Цей сигнал сам по собі не доводить банкрутство.", response)
+        self.assertNotIn("статус компанії в ЄДР/судових джерелах", response)
         self.assertNotIn("⚠️ Знайдено ризикові аукціони", response)
         self.assertNotIn("банкрутство самої компанії", response.split("Причини оцінки:", 1)[1])
         self.assertEqual(risk_summary.score, 5)
         self.assertEqual([reason["type"] for reason in risk_summary.reasons], ["prozorro_sale_debtor_mention"])
+
+    def test_prozorro_sale_debtor_mention_explains_separate_confirmed_bankruptcy_status(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import (
+            CompanyData,
+            CompanyLookupResult,
+            ProzorroSaleAnalysis,
+            ProzorroSaleRiskAuction,
+        )
+
+        result = CompanyLookupResult(
+            status="found",
+            edrpou="39525257",
+            company_data=CompanyData(
+                short_name="ТОВ «ОДЕСАГАЗ-ПОСТАЧАННЯ»",
+                edrpou="39525257",
+                status="порушено справу про банкрутство",
+            ),
+            prozorro_sale_analysis=ProzorroSaleAnalysis(
+                status="found",
+                checked_count=1,
+                confirmed_count=1,
+                informational_mentions=[
+                    ProzorroSaleRiskAuction(
+                        auction_id="BRD001-UA-20260522-66821",
+                        risk="компанія згадується у складі дебіторської заборгованості банкрута",
+                        url="https://prozorro.sale/auction/BRD001-UA-20260522-66821/",
+                        role="debtor_mention",
+                    )
+                ],
+                risk_flags=[
+                    {
+                        "type": "prozorro_sale_debtor_mention",
+                        "source": "prozorro_sale",
+                        "status": "found",
+                        "raw_text": "BRD001-UA-20260522-66821 — компанія згадується у складі дебіторської заборгованості банкрута.",
+                    }
+                ],
+            ),
+        )
+
+        response = build_edrpou_response("39525257", result)
+        reason_block = response.split("Причини оцінки:", 1)[1].split("Загальний ризик:", 1)[0]
+
+        self.assertIn(
+            "Цей сигнал сам по собі не доводить банкрутство, але окремо статус компанії в ЄДР/судових джерелах уже вказує на порушену справу про банкрутство.",
+            response,
+        )
+        self.assertIn("Банкрутний ризик підтверджено", reason_block)
 
     def test_found_company_response_shows_unsuccessful_prozorro_sale_auction_as_information(self):
         from app.bot import build_edrpou_response, build_risk_summary
@@ -1313,10 +1445,12 @@ class BotResponseTests(unittest.TestCase):
         response = build_edrpou_response("12345678", result)
         risk_summary = build_risk_summary(result, None)
 
-        self.assertIn("Підтверджено участь компанії серед перевірених: 0.", response)
+        self.assertIn("Компанія має згадки у публічних закупівлях.", response)
+        self.assertIn("Автоматично підтвердити роль у перевірених 10 результатах не вдалося.", response)
+        self.assertNotIn("Підтверджено участь компанії серед перевірених: 0.", response)
         self.assertNotIn("Участей/перемог/договорів:", response)
         self.assertIn(
-            "Частина результатів пошуку може бути текстовими збігами, а не закупівлями цієї компанії.",
+            "Сам факт згадки у Prozorro не є ризиком; потрібна окрема перевірка ролі: учасник, переможець, замовник або текстовий збіг.",
             response,
         )
         self.assertIn(
@@ -1725,11 +1859,112 @@ class BotResponseTests(unittest.TestCase):
 
         self.assertEqual(
             START_TEXT,
-            "Вітаю! Я RiskUA.\n\n"
-            "Допомагаю швидко перевірити компанію за ЄДРПОУ перед оплатою, договором або співпрацею.\n\n"
-            "Надішліть код ЄДРПОУ — я покажу базові дані, можливі ризики та коротку рекомендацію.\n\n"
-            "Приклад: 12345678\n\n"
-            "⏳ Аналіз може зайняти до 1 хвилини.",
+            "RiskUA — швидка перевірка контрагента 🔎\n\n"
+            "🎁 Демо-перевірка — безкоштовно\n"
+            "\n"
+            "У демо ви отримаєте:\n\n"
+            "🔎 базові реєстраційні дані\n"
+            "🏢 назву, статус, адресу та керівника\n"
+            "⚠️ короткий попередній огляд ризиків\n"
+            "📊 орієнтовний рівень ризику\n\n"
+            "💳 Повна перевірка\n\n"
+            "Повна перевірка включає:\n\n"
+            "🏢 розширені дані про контрагента\n"
+            "📊 фінансові показники\n"
+            "☎️ контактну інформацію\n"
+            "📈 динаміку капіталу\n"
+            "🏛 перевірку Prozorro\n"
+            "⚖️ судові та ризикові сигнали\n"
+            "🚨 ознаки банкрутства, припинення або боргів\n"
+            "🧩 причини оцінки ризику\n"
+            "🤖 AI-висновок щодо співпраці\n"
+            "✅ рекомендацію: чи варто співпрацювати\n"
+            "📊 загальний ризик від 0 до 100\n\n"
+            "Тарифи:\n\n"
+            "🔎 1 повна перевірка — 29 грн\n"
+            "📦 10 повних перевірок — 199 грн\n\n"
+            "⏳ Аналіз може зайняти до 1 хвилини.\n\n"
+            "Надішліть ЄДРПОУ, щоб почати 👇",
+        )
+
+    def test_bot_profile_description_copy(self):
+        from app.bot import BOT_DESCRIPTION_TEXT, BOT_SHORT_DESCRIPTION_TEXT
+
+        self.assertEqual(
+            BOT_DESCRIPTION_TEXT,
+            "RiskUA — швидка перевірка контрагента 🔎",
+        )
+        self.assertEqual(
+            BOT_SHORT_DESCRIPTION_TEXT,
+            "RiskUA — швидка перевірка контрагента перед оплатою, договором або співпрацею.",
+        )
+
+    def test_configure_bot_profile_updates_description_fields(self):
+        import asyncio
+
+        from app.bot import BOT_DESCRIPTION_TEXT, BOT_SHORT_DESCRIPTION_TEXT, configure_bot_profile
+
+        class FakeBot:
+            def __init__(self):
+                self.description: str | None = None
+                self.short_description: str | None = None
+
+            async def set_my_description(self, description: str) -> None:
+                self.description = description
+
+            async def set_my_short_description(self, short_description: str) -> None:
+                self.short_description = short_description
+
+        bot = FakeBot()
+
+        asyncio.run(configure_bot_profile(bot))
+
+        self.assertEqual(bot.description, BOT_DESCRIPTION_TEXT)
+        self.assertEqual(bot.short_description, BOT_SHORT_DESCRIPTION_TEXT)
+
+    def test_run_bot_syncs_profile_description_before_polling(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from app.bot import BOT_DESCRIPTION_TEXT, BOT_SHORT_DESCRIPTION_TEXT, run_bot
+
+        events: list[str] = []
+
+        class FakeBot:
+            def __init__(self, token: str):
+                self.token = token
+                self.description: str | None = None
+                self.short_description: str | None = None
+
+            async def set_my_description(self, description: str) -> None:
+                self.description = description
+                events.append(f"description:{description}")
+
+            async def set_my_short_description(self, short_description: str) -> None:
+                self.short_description = short_description
+                events.append(f"short:{short_description}")
+
+        class FakeDispatcher:
+            async def start_polling(self, bot: FakeBot) -> None:
+                events.append(f"polling:{bot.token}")
+
+        with (
+            patch("app.bot.load_settings", return_value=SimpleNamespace(bot_token="123456:test-token", app_env="test")),
+            patch("app.bot.configure_diagnostic_logging"),
+            patch("app.bot.log_diagnostic_event"),
+            patch("app.bot.Bot", FakeBot),
+            patch("app.bot.create_dispatcher", return_value=FakeDispatcher()),
+        ):
+            asyncio.run(run_bot())
+
+        self.assertEqual(
+            events,
+            [
+                f"description:{BOT_DESCRIPTION_TEXT}",
+                f"short:{BOT_SHORT_DESCRIPTION_TEXT}",
+                "polling:123456:test-token",
+            ],
         )
 
     def test_default_analysis_timeout_is_one_minute(self):
@@ -2183,7 +2418,7 @@ class BotResponseTests(unittest.TestCase):
 
         self.assertIn("Причини оцінки:", response)
         self.assertIn("критичний — 90/100", response)
-        self.assertIn("Знайдено записи, пов'язані з банкрутством", response)
+        self.assertIn("Банкрутний ризик підтверджено", response)
         self.assertNotIn("шахрай", response.lower())
         self.assertNotIn("Рекомендація: перед передоплатою", response)
         self.assertNotIn("Критичних ознак у базовій інформаційній перевірці не виявлено", response)
@@ -2634,6 +2869,47 @@ class BotResponseTests(unittest.TestCase):
         self.assertIn("заборгованості із заробітної плати", response)
         self.assertIn("стягнення судового збору", response)
         self.assertIn("Єдиний реєстр боржників", response)
+
+    def test_debtors_registry_budget_fine_and_court_fee_cases_are_shown_in_response(self):
+        from app.bot import build_edrpou_response
+        from app.models.company_lookup import CompanyData, CompanyLookupResult
+
+        debtors_registry_data = {
+            "source": "debtors_registry",
+            "checked": True,
+            "found": True,
+            "url": "https://erb.minjust.gov.ua/#/search-debtors",
+            "searched_edrpou": "33000657",
+            "items_count": 2,
+            "items": [],
+            "signals": [
+                "Компанія знайдена в Єдиному реєстрі боржників",
+                "Знайдено 2 записи у реєстрі боржників",
+            ],
+            "risk_flags": [
+                "debtor_registry_found",
+                "debt_collection_found",
+                "fine_or_penalty_enforcement_found",
+                "court_fee_enforcement_found",
+            ],
+            "error": None,
+        }
+
+        response = build_edrpou_response(
+            "33000657",
+            CompanyLookupResult(
+                status="found",
+                edrpou="33000657",
+                company_data=CompanyData(short_name="ТОВ «ПРИКЛАД»", edrpou="33000657"),
+            ),
+            debtors_registry_data=debtors_registry_data,
+        )
+
+        self.assertIn("Компанія знайдена в Єдиному реєстрі боржників", response)
+        self.assertIn("стягнення коштів, заборгованості або платежів до бюджету", response)
+        self.assertIn("штрафів, пені або санкцій", response)
+        self.assertIn("стягнення судового збору", response)
+        self.assertNotIn("Податковий борг та борг ЄСВ у доступних даних не виявлено.", response)
 
     def test_source_snapshot_includes_tax_and_dedupes_tax_debt_risk_flags(self):
         from app.bot import with_source_diagnostics

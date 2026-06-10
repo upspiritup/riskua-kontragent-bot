@@ -58,12 +58,36 @@ from app.utils.validators import is_valid_edrpou
 
 
 START_TEXT = (
-    "Вітаю! Я RiskUA.\n\n"
-    "Допомагаю швидко перевірити компанію за ЄДРПОУ перед оплатою, договором або співпрацею.\n\n"
-    "Надішліть код ЄДРПОУ — я покажу базові дані, можливі ризики та коротку рекомендацію.\n\n"
-    "Приклад: 12345678\n\n"
-    "⏳ Аналіз може зайняти до 1 хвилини."
+    "RiskUA — швидка перевірка контрагента 🔎\n\n"
+    "🎁 Демо-перевірка — безкоштовно\n"
+    "\n"
+    "У демо ви отримаєте:\n\n"
+    "🔎 базові реєстраційні дані\n"
+    "🏢 назву, статус, адресу та керівника\n"
+    "⚠️ короткий попередній огляд ризиків\n"
+    "📊 орієнтовний рівень ризику\n\n"
+    "💳 Повна перевірка\n\n"
+    "Повна перевірка включає:\n\n"
+    "🏢 розширені дані про контрагента\n"
+    "📊 фінансові показники\n"
+    "☎️ контактну інформацію\n"
+    "📈 динаміку капіталу\n"
+    "🏛 перевірку Prozorro\n"
+    "⚖️ судові та ризикові сигнали\n"
+    "🚨 ознаки банкрутства, припинення або боргів\n"
+    "🧩 причини оцінки ризику\n"
+    "🤖 AI-висновок щодо співпраці\n"
+    "✅ рекомендацію: чи варто співпрацювати\n"
+    "📊 загальний ризик від 0 до 100\n\n"
+    "Тарифи:\n\n"
+    "🔎 1 повна перевірка — 29 грн\n"
+    "📦 10 повних перевірок — 199 грн\n\n"
+    "⏳ Аналіз може зайняти до 1 хвилини.\n\n"
+    "Надішліть ЄДРПОУ, щоб почати 👇"
 )
+
+BOT_DESCRIPTION_TEXT = "RiskUA — швидка перевірка контрагента 🔎"
+BOT_SHORT_DESCRIPTION_TEXT = "RiskUA — швидка перевірка контрагента перед оплатою, договором або співпрацею."
 
 HELP_TEXT = (
     "Доступні команди:\n"
@@ -108,6 +132,29 @@ SOURCE_ERROR_TEXT = "Не вдалося отримати дані з джере
 EDRPOU_SEARCH_TEXT = "🔎 Шукаю дані та формую коротку рекомендацію. Це може зайняти до 1 хвилини..."
 STOP_BUTTON_TEXT = "🛑 Зупинити"
 INFO_BUTTON_TEXT = "ℹ️ Як працює"
+ADMIN_TELEGRAM_USERNAME = "reng_363"
+ADMIN_TELEGRAM_URL = f"https://t.me/{ADMIN_TELEGRAM_USERNAME}"
+CONTACT_ADMIN_BUTTON_TEXT = "📩 Написати адміністратору"
+CONTACT_ADMIN_TEXT = f"Напишіть адміністратору: @{ADMIN_TELEGRAM_USERNAME}\n{ADMIN_TELEGRAM_URL}"
+PAYMENT_BUTTON_TEXT = "💳 Оплатити"
+PAYMENT_STUB_TEXT = (
+    "💳 Оберіть пакет перевірок\n\n"
+    "🔎 1 повна перевірка — 29 грн\n"
+    "📦 10 повних перевірок — 199 грн\n\n"
+    "✅ Що входить у повну перевірку:\n\n"
+    "🏢 Реєстраційні дані компанії\n"
+    "👤 Керівник, адреса, статус та КВЕД\n"
+    "💰 Фінансові показники\n"
+    "☎️ Контактна інформація\n"
+    "📈 Динаміка статутного капіталу\n"
+    "🏛 Перевірка Prozorro\n"
+    "⚖️ Судові та ризикові сигнали\n"
+    "🚨 Ознаки банкрутства, припинення або боргів\n"
+    "🧩 Причини оцінки ризику\n"
+    "🤖 AI-висновок щодо співпраці\n"
+    "📊 Загальний ризик від 0 до 100\n\n"
+    "Оберіть пакет нижче 👇"
+)
 ANALYSIS_TIMEOUT_SECONDS = 60.0
 SHOW_TECHNICAL_LIMITATIONS = False
 LOW_AUTHORIZED_CAPITAL_THRESHOLD_UAH = 5001
@@ -154,7 +201,11 @@ YOUCONTROL_RISK_DEFINITIONS = {
 
 def build_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=STOP_BUTTON_TEXT), KeyboardButton(text=INFO_BUTTON_TEXT)]],
+        keyboard=[
+            [KeyboardButton(text=STOP_BUTTON_TEXT), KeyboardButton(text=INFO_BUTTON_TEXT)],
+            [KeyboardButton(text=PAYMENT_BUTTON_TEXT)],
+            [KeyboardButton(text=CONTACT_ADMIN_BUTTON_TEXT)],
+        ],
         resize_keyboard=True,
     )
 
@@ -270,7 +321,10 @@ def format_found_company(
     prozorro_lines = build_prozorro_section_lines(lookup_result)
     if prozorro_lines:
         lines.extend(["", "Prozorro:", *prozorro_lines])
-    prozorro_sale_lines = build_prozorro_sale_section_lines(lookup_result.prozorro_sale_analysis)
+    prozorro_sale_lines = build_prozorro_sale_section_lines(
+        lookup_result.prozorro_sale_analysis,
+        bankruptcy_confirmed=has_confirmed_bankruptcy_reason(final_risk),
+    )
     if prozorro_sale_lines:
         lines.extend(["", "Prozorro.Sale:", *prozorro_sale_lines])
     if court_document_lines:
@@ -456,7 +510,11 @@ def is_reportable_prozorro_sale_analysis(prozorro_sale_analysis: ProzorroSaleAna
     )
 
 
-def build_prozorro_sale_section_lines(prozorro_sale_analysis: ProzorroSaleAnalysis | None) -> list[str]:
+def build_prozorro_sale_section_lines(
+    prozorro_sale_analysis: ProzorroSaleAnalysis | None,
+    *,
+    bankruptcy_confirmed: bool = False,
+) -> list[str]:
     if not is_reportable_prozorro_sale_analysis(prozorro_sale_analysis):
         return []
 
@@ -473,10 +531,14 @@ def build_prozorro_sale_section_lines(prozorro_sale_analysis: ProzorroSaleAnalys
         if mention.role == "debtor_mention"
     ]
     if debtor_mentions:
-        lines.append(
-            "Prozorro.Sale: компанія згадується у складі дебіторської заборгованості банкрута. "
-            "Це не означає банкрутство самої компанії."
-        )
+        lines.append("Компанія також згадується у лотах, пов’язаних із дебіторською заборгованістю.")
+        if bankruptcy_confirmed:
+            lines.append(
+                "Цей сигнал сам по собі не доводить банкрутство, але окремо статус компанії "
+                "в ЄДР/судових джерелах уже вказує на порушену справу про банкрутство."
+            )
+        else:
+            lines.append("Цей сигнал сам по собі не доводить банкрутство.")
         for mention in debtor_mentions:
             auction_id = mention.auction_id or "без ID"
             lines.append(f"{auction_id}: {mention.url}")
@@ -504,19 +566,28 @@ def build_prozorro_search_summary_lines(prozorro_analysis: ProzorroAnalysis | No
     checked_count = search_summary.checked_count
     confirmed_participation_count = search_summary.confirmed_participation_count or 0
     lines = [
+        "Компанія має згадки у публічних закупівлях.",
         f"Результатів у пошуку Prozorro: {format_int(total_count)}.",
         f"Перевірено у видачі: {format_int(checked_count)}.",
-        (
-            "Підтверджено участь компанії серед перевірених: "
-            f"{format_int(confirmed_participation_count)}."
-        ),
         build_prozorro_search_risk_scan_line(
             search_summary.items,
             confirmed_participation_count=confirmed_participation_count,
         ),
     ]
     if confirmed_participation_count > 0:
+        lines.insert(
+            3,
+            (
+                "Підтверджено участь компанії серед перевірених: "
+                f"{format_int(confirmed_participation_count)}."
+            ),
+        )
         lines.append(build_prozorro_search_participation_line(confirmed_participation_count))
+    else:
+        lines.insert(
+            3,
+            f"Автоматично підтвердити роль у перевірених {format_int(checked_count)} результатах не вдалося.",
+        )
     lines.extend(build_prozorro_search_text_match_note_lines(confirmed_participation_count))
     return lines
 
@@ -530,7 +601,10 @@ def build_prozorro_search_participation_line(confirmed_participation_count: int)
 def build_prozorro_search_text_match_note_lines(confirmed_participation_count: int) -> list[str]:
     if confirmed_participation_count > 0:
         return []
-    return ["Частина результатів пошуку може бути текстовими збігами, а не закупівлями цієї компанії."]
+    return [
+        "Сам факт згадки у Prozorro не є ризиком; потрібна окрема перевірка ролі: "
+        "учасник, переможець, замовник або текстовий збіг."
+    ]
 
 
 def build_prozorro_search_item_lines(items: list[dict]) -> list[str]:
@@ -1098,6 +1172,7 @@ def build_assessment_reason_lines(
         "large_tax_debt_found",
         "tax_debt_enforcement_found",
         "debt_collection_found",
+        "fine_or_penalty_enforcement_found",
         "debtor_registry_found",
     }
     if not reason_types.intersection(debt_reason_types) and tax_debts_not_found(clarity_data, tax_data):
@@ -1295,6 +1370,13 @@ def build_caution_lines(
     return dedupe_lines(lines)
 
 
+def has_confirmed_bankruptcy_reason(final_risk: dict) -> bool:
+    return any(
+        reason.get("type") == "bankruptcy_found" and reason.get("status") != "conflict"
+        for reason in final_risk.get("reasons", [])
+    )
+
+
 def build_top_risk_reason_lines(
     final_risk: dict,
     *,
@@ -1313,6 +1395,8 @@ def user_risk_reason_text(reason: dict, lookup_result: CompanyLookupResult | Non
     reason_type = reason.get("type")
     if reason.get("status") == "conflict" and reason_type == "bankruptcy_found":
         return "Є суперечливі дані щодо банкрутства. Потрібна ручна перевірка першоджерел."
+    if reason_type == "bankruptcy_found":
+        return "Банкрутний ризик підтверджено: знайдено статус, судові або реєстрові записи, пов'язані з банкрутством."
     if reason_type == "court_cases_found":
         if lookup_result is not None:
             return format_court_mentions_line(get_court_mentions_count(lookup_result)).removeprefix("ℹ️ ")
@@ -1333,6 +1417,10 @@ def user_risk_reason_text(reason: dict, lookup_result: CompanyLookupResult | Non
         return first_reason_evidence_text(reason, "clarity_project") or "Знайдено податковий борг у доступних податкових даних."
     if reason_type == "tax_debt_enforcement_found":
         return "Виявлено виконавче провадження на користь ДПС / державного бюджету."
+    if reason_type == "debt_collection_found":
+        return "Є виконавче провадження щодо стягнення коштів, заборгованості або платежів до бюджету."
+    if reason_type == "fine_or_penalty_enforcement_found":
+        return "Є виконавче провадження щодо штрафів, пені або санкцій."
     if reason_type == "many_enforcement_proceedings_found":
         return "Виявлено значну кількість виконавчих проваджень."
     if reason_type == "many_court_mentions_found":
@@ -1551,6 +1639,10 @@ def build_debtors_signal_lines(debtors_registry_data: dict | None) -> list[str]:
         lines.append("⚠️ Є виконавче провадження щодо заборгованості із заробітної плати.")
     if "court_fee_enforcement_found" in risk_flags:
         lines.append("⚠️ Є виконавчі провадження щодо стягнення судового збору.")
+    if "debt_collection_found" in risk_flags:
+        lines.append("⚠️ Є виконавче провадження щодо стягнення коштів, заборгованості або платежів до бюджету.")
+    if "fine_or_penalty_enforcement_found" in risk_flags:
+        lines.append("⚠️ Є виконавче провадження щодо штрафів, пені або санкцій.")
     if "tax_debt_enforcement_found" in risk_flags:
         lines.append("⚠️ Виявлено виконавче провадження на користь ДПС / державного бюджету.")
     return lines
@@ -2897,6 +2989,7 @@ def is_debt_related_flag(flag: dict) -> bool:
         "tax_debt_enforcement_found",
         "salary_debt_enforcement_found",
         "debt_collection_found",
+        "fine_or_penalty_enforcement_found",
         "debtor_registry_found",
         "multiple_debtor_records",
         "enforcement_found",
@@ -3533,6 +3626,11 @@ async def start_handler(message: Message) -> None:
     await message.answer(START_TEXT, reply_markup=build_main_keyboard())
 
 
+async def configure_bot_profile(bot: Bot) -> None:
+    await bot.set_my_description(BOT_DESCRIPTION_TEXT)
+    await bot.set_my_short_description(BOT_SHORT_DESCRIPTION_TEXT)
+
+
 async def help_handler(message: Message) -> None:
     await message.answer(HELP_TEXT)
 
@@ -3551,6 +3649,14 @@ async def about_handler(message: Message) -> None:
 
 async def info_handler(message: Message) -> None:
     await message.answer(INFO_TEXT)
+
+
+async def contact_admin_handler(message: Message) -> None:
+    await message.answer(CONTACT_ADMIN_TEXT)
+
+
+async def payment_handler(message: Message) -> None:
+    await message.answer(PAYMENT_STUB_TEXT)
 
 
 async def stop_handler(message: Message) -> None:
@@ -3796,6 +3902,8 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(debug_handler, Command("debug"))
     dispatcher.message.register(stop_handler, F.text == STOP_BUTTON_TEXT)
     dispatcher.message.register(info_handler, F.text == INFO_BUTTON_TEXT)
+    dispatcher.message.register(payment_handler, F.text == PAYMENT_BUTTON_TEXT)
+    dispatcher.message.register(contact_admin_handler, F.text == CONTACT_ADMIN_BUTTON_TEXT)
     dispatcher.message.register(example_handler, Command("example"))
     dispatcher.message.register(about_handler, Command("about"))
     dispatcher.message.register(edrpou_handler, F.text)
@@ -3811,6 +3919,7 @@ async def run_bot() -> None:
 
     bot = Bot(token=settings.bot_token)
     dispatcher = create_dispatcher()
+    await configure_bot_profile(bot)
     await dispatcher.start_polling(bot)
 
 
