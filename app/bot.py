@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
 from collections.abc import Callable
 from datetime import date, datetime
@@ -14,6 +15,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from app.config import load_settings
+from app.health import start_health_server
 from app.models.clarity import ClarityData
 from app.models.company_lookup import (
     CompanyData,
@@ -3917,10 +3919,20 @@ async def run_bot() -> None:
     configure_diagnostic_logging()
     log_diagnostic_event("bot_start", route="run_bot", app_env=settings.app_env)
 
-    bot = Bot(token=settings.bot_token)
-    dispatcher = create_dispatcher()
-    await configure_bot_profile(bot)
-    await dispatcher.start_polling(bot)
+    health_server = None
+    port = os.environ.get("PORT", "").strip()
+    if port:
+        health_server = start_health_server(int(port))
+        logging.info("Cloud Run health server is listening on port %s", port)
+
+    try:
+        bot = Bot(token=settings.bot_token)
+        dispatcher = create_dispatcher()
+        await configure_bot_profile(bot)
+        await dispatcher.start_polling(bot)
+    finally:
+        if health_server is not None:
+            health_server.shutdown()
 
 
 def main() -> None:

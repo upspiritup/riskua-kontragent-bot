@@ -1924,6 +1924,7 @@ class BotResponseTests(unittest.TestCase):
 
     def test_run_bot_syncs_profile_description_before_polling(self):
         import asyncio
+        import os
         from types import SimpleNamespace
         from unittest.mock import patch
 
@@ -1950,6 +1951,7 @@ class BotResponseTests(unittest.TestCase):
                 events.append(f"polling:{bot.token}")
 
         with (
+            patch.dict(os.environ, {}, clear=True),
             patch("app.bot.load_settings", return_value=SimpleNamespace(bot_token="123456:test-token", app_env="test")),
             patch("app.bot.configure_diagnostic_logging"),
             patch("app.bot.log_diagnostic_event"),
@@ -1964,6 +1966,60 @@ class BotResponseTests(unittest.TestCase):
                 f"description:{BOT_DESCRIPTION_TEXT}",
                 f"short:{BOT_SHORT_DESCRIPTION_TEXT}",
                 "polling:123456:test-token",
+            ],
+        )
+
+    def test_run_bot_starts_cloud_run_health_server_when_port_is_set(self):
+        import asyncio
+        import os
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from app.bot import run_bot
+
+        events: list[str] = []
+
+        class FakeBot:
+            def __init__(self, token: str):
+                self.token = token
+
+            async def set_my_description(self, description: str) -> None:
+                events.append("description")
+
+            async def set_my_short_description(self, short_description: str) -> None:
+                events.append("short_description")
+
+        class FakeDispatcher:
+            async def start_polling(self, bot: FakeBot) -> None:
+                events.append(f"polling:{bot.token}")
+
+        class FakeHealthServer:
+            def shutdown(self) -> None:
+                events.append("health_shutdown")
+
+        def fake_start_health_server(port: int) -> FakeHealthServer:
+            events.append(f"health:{port}")
+            return FakeHealthServer()
+
+        with (
+            patch.dict(os.environ, {"PORT": "8080"}, clear=True),
+            patch("app.bot.load_settings", return_value=SimpleNamespace(bot_token="123456:test-token", app_env="test")),
+            patch("app.bot.configure_diagnostic_logging"),
+            patch("app.bot.log_diagnostic_event"),
+            patch("app.bot.Bot", FakeBot),
+            patch("app.bot.create_dispatcher", return_value=FakeDispatcher()),
+            patch("app.bot.start_health_server", side_effect=fake_start_health_server),
+        ):
+            asyncio.run(run_bot())
+
+        self.assertEqual(
+            events,
+            [
+                "health:8080",
+                "description",
+                "short_description",
+                "polling:123456:test-token",
+                "health_shutdown",
             ],
         )
 
