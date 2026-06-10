@@ -142,15 +142,50 @@ class ProzorroStats(BaseModel):
     high_discount_bids_count: int = 0
 
 
+class ProzorroSearchSummary(BaseModel):
+    total_count: int | None = None
+    checked_count: int = 0
+    detail_checked_count: int = 0
+    confirmed_participation_count: int = 0
+    participant_count: int = 0
+    winner_count: int = 0
+    supplier_contract_count: int = 0
+    buyer_count: int = 0
+    source_url: str | None = None
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    matched_procurements: list[ProzorroProcurement] = Field(default_factory=list)
+
+
 class ProzorroAnalysis(BaseModel):
     source: str = "prozorro_analysis"
-    status: Literal["found", "not_found", "partial", "source_error"] = "not_found"
+    status: Literal["found", "not_found", "partial", "source_error", "unavailable"] = "not_found"
     stats: ProzorroStats = Field(default_factory=ProzorroStats)
     procurements: list[ProzorroProcurement] = Field(default_factory=list)
+    search_summary: ProzorroSearchSummary | None = None
     risk_flags: list[dict[str, Any]] = Field(default_factory=list)
     info_notes: list[str] = Field(default_factory=list)
     summary: str | None = None
     parse_warnings: list[str] = Field(default_factory=list)
+    error: str | None = None
+    checked_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ProzorroSaleRiskAuction(BaseModel):
+    auction_id: str | None = None
+    risk: str
+    url: str
+    role: str | None = None
+
+
+class ProzorroSaleAnalysis(BaseModel):
+    source: str = "prozorro_sale"
+    source_url: str | None = None
+    status: Literal["found", "not_found", "source_error"] = "not_found"
+    checked_count: int = 0
+    confirmed_count: int = 0
+    risky_auctions: list[ProzorroSaleRiskAuction] = Field(default_factory=list)
+    informational_mentions: list[ProzorroSaleRiskAuction] = Field(default_factory=list)
+    risk_flags: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
     checked_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -233,6 +268,7 @@ class CompanyLookupResult(BaseModel):
     tax_data: dict[str, Any] | None = None
     domain_reputation_data: dict[str, Any] | None = None
     prozorro_analysis: ProzorroAnalysis | None = None
+    prozorro_sale_analysis: ProzorroSaleAnalysis | None = None
     contacts_summary: dict[str, Any] | None = None
     sources: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None

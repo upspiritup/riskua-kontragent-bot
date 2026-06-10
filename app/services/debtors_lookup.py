@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from html import unescape
 from html.parser import HTMLParser
 import logging
+import os
 import re
 from typing import Any, Callable
 
@@ -14,6 +15,8 @@ SOURCE = "debtors_registry"
 SOURCE_UNAVAILABLE = "source_unavailable"
 BASE_DEBTORS_URL = "https://erb.minjust.gov.ua/#/search-debtors"
 BROWSER_TIMEOUT_MS = 15_000
+DEBTORS_BROWSER_CHANNEL_ENV = "RISKUA_DEBTORS_BROWSER_CHANNEL"
+DEBTORS_BROWSER_HEADLESS_ENV = "RISKUA_DEBTORS_BROWSER_HEADLESS"
 
 
 class VisibleTextParser(HTMLParser):
@@ -83,6 +86,37 @@ def build_debtors_result_url() -> str:
     return BASE_DEBTORS_URL
 
 
+def build_browser_launch_options() -> dict[str, Any]:
+    headless = env_flag(DEBTORS_BROWSER_HEADLESS_ENV, default=True)
+    options: dict[str, Any] = {"headless": headless}
+    channel = os.environ.get(DEBTORS_BROWSER_CHANNEL_ENV, "").strip()
+    if channel:
+        options["channel"] = channel
+    if not headless:
+        options["args"] = ["--start-minimized"]
+    return options
+
+
+def env_flag(name: str, *, default: bool) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def wait_for_networkidle_if_possible(page: Any, timeout_error: type[BaseException]) -> bool:
+    try:
+        page.wait_for_load_state("networkidle", timeout=BROWSER_TIMEOUT_MS)
+    except timeout_error:
+        return False
+    return True
+
+
 def fetch_debtors_registry(
     edrpou: str,
     fetcher: Callable[[str], str | dict[str, Any]] | None = None,
@@ -115,13 +149,13 @@ def fetch_debtors_registry_with_browser(edrpou: str) -> dict:
 
     try:
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
+            browser = playwright.chromium.launch(**build_browser_launch_options())
             try:
                 page = browser.new_page()
                 page.goto(BASE_DEBTORS_URL, wait_until="domcontentloaded", timeout=BROWSER_TIMEOUT_MS)
-                page.wait_for_load_state("networkidle", timeout=BROWSER_TIMEOUT_MS)
+                wait_for_networkidle_if_possible(page, PlaywrightTimeoutError)
 
-                if captcha_detected(page.content()):
+                if visible_html_has_captcha(page.content()):
                     return unavailable_result(edrpou)
 
                 if not select_legal_entity(page):
@@ -131,7 +165,7 @@ def fetch_debtors_registry_with_browser(edrpou: str) -> dict:
                 if not click_search(page):
                     return unavailable_result(edrpou)
 
-                page.wait_for_load_state("networkidle", timeout=BROWSER_TIMEOUT_MS)
+                wait_for_networkidle_if_possible(page, PlaywrightTimeoutError)
                 wait_for_results_or_empty_state(page)
                 return parse_debtors_results(page.content(), edrpou)
             finally:
@@ -271,7 +305,12 @@ def parse_table_items(rows: list[list[str]], edrpou: str) -> list[dict[str, Any]
 
 def is_header_row(cells: list[str]) -> bool:
     joined = " ".join(cells).lower()
-    return "найменування" in joined and "номер виконавчого провадження" in joined
+    return (
+        "найменування" in joined
+        and "номер виконавчого провадження" in joined
+        or "прізвище" in joined
+        and "номер вп" in joined
+    )
 
 
 def executor_details_available(cells: list[str]) -> bool:
@@ -321,6 +360,9 @@ def classify_debt_category(category: str) -> dict:
     flags: list[str] = []
     level = "medium"
 
+    if contains_any(lowered, ("державного бюджету", "місцевого бюджету", "бюджет", "платежі", "платежів")):
+        flags.append("debt_collection_found")
+        level = "high"
     if contains_any(lowered, ("судовий збір", "стягнення судового збору")):
         flags.append("court_fee_enforcement_found")
         level = "medium"
@@ -340,7 +382,7 @@ def classify_debt_category(category: str) -> dict:
     return {
         "category": category,
         "risk_level": level if flags else "low",
-        "risk_flags": flags,
+        "risk_flags": unique(flags),
     }
 
 
@@ -400,6 +442,10 @@ def build_signals(items: list[dict[str, Any]], risk_flags: list[str]) -> list[st
         signals.append("Є стягнення заборгованості із заробітної плати")
     if "court_fee_enforcement_found" in risk_flags:
         signals.append("Є стягнення судового збору")
+    if "debt_collection_found" in risk_flags:
+        signals.append("Є стягнення коштів, заборгованості або платежів до бюджету")
+    if "fine_or_penalty_enforcement_found" in risk_flags:
+        signals.append("Є стягнення штрафів, пені або санкцій")
     if "tax_debt_enforcement_found" in risk_flags:
         signals.append("Є податковий борг у виконавчому провадженні")
     return signals
@@ -459,6 +505,10 @@ def extract_table_rows(html: str) -> list[list[str]]:
     parser = TableParser()
     parser.feed(html)
     return parser.rows
+
+
+def visible_html_has_captcha(html: str) -> bool:
+    return captcha_detected(join_text(extract_visible_text(html)))
 
 
 def normalize_text(text: str) -> str:

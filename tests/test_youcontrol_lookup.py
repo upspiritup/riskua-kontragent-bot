@@ -200,6 +200,49 @@ class YouControlLookupTests(unittest.TestCase):
         self.assertTrue(result["found"])
         self.assertIn("bankruptcy_found", result["risk_flags"])
 
+    def test_bankruptcy_procedure_phrase_creates_flag(self):
+        from app.services.youcontrol_lookup import fetch_youcontrol_company
+
+        html = """
+        <html>
+          <body>
+            <main>
+              <h1>ТОВ «УКРІНВЕСТ»</h1>
+              <p>Код ЄДРПОУ</p><p>25102871</p>
+              <p>Статус</p><p>припинено</p>
+              <p>Виконується процедура банкрутства</p>
+            </main>
+          </body>
+        </html>
+        """
+
+        result = fetch_youcontrol_company("25102871", fetcher=lambda url: html)
+
+        self.assertTrue(result["found"])
+        self.assertIn("bankruptcy_found", result["risk_flags"])
+        self.assertIn("Банкрутство: виявлено", result["signals"])
+
+    def test_liquidation_mass_phrase_creates_bankruptcy_flag(self):
+        from app.services.youcontrol_lookup import fetch_youcontrol_company
+
+        html = """
+        <html>
+          <body>
+            <main>
+              <h1>ТОВ «УКРІНВЕСТ»</h1>
+              <p>Код ЄДРПОУ</p><p>25102871</p>
+              <p>Статус</p><p>припинено</p>
+              <p>Продаж майна, яке увійшло до ліквідаційної маси банкрута, у справі про банкрутство №904/4250/24.</p>
+            </main>
+          </body>
+        </html>
+        """
+
+        result = fetch_youcontrol_company("25102871", fetcher=lambda url: html)
+
+        self.assertTrue(result["found"])
+        self.assertIn("bankruptcy_found", result["risk_flags"])
+
 
 if __name__ == "__main__":
     unittest.main()

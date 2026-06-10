@@ -247,6 +247,118 @@ class OpendatabotLookupTests(unittest.TestCase):
         self.assertIsNone(result.risk_input.court_unique_cases_count)
         self.assertIsNone(result.risk_input.court_risky_cases_count)
 
+    def test_parse_company_status_company_label_takes_precedence_over_tax_registration_text(self):
+        from app.services.opendatabot_lookup import parse_company_page
+
+        html = """
+        <html><body><main>
+          <p>Код ЄДРПОУ</p><h1>25102871</h1>
+          <h2>ТОВ «УКРІНВЕСТ»</h2>
+          <p>Компанія зареєстрована на загальній системі оподаткування</p>
+          <p>Статус компанії</p><p>припинено</p>
+          <p>Повна назва</p><p>ТОВАРИСТВО З ОБМЕЖЕНОЮ ВІДПОВІДАЛЬНІСТЮ «УКРІНВЕСТ»</p>
+          <p>Дата заснування</p><p>27.08.1997</p>
+          <p>Адреса</p><p>49083, Україна, Дніпропетровська обл., місто Дніпро</p>
+          <p>Директор</p><p>Мотрич Іван Олександрович</p>
+          <p>Основний вид діяльності</p><p>73.20 Дослідження кон'юнктури ринку та виявлення громадської думки</p>
+        </main></body></html>
+        """
+
+        result = parse_company_page(html, "25102871")
+
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.company_data.status, "припинено")
+
+    def test_parse_company_status_ignores_historical_termination_context(self):
+        from app.services.opendatabot_lookup import parse_company_page
+
+        html = """
+        <html><body><main>
+          <p>Код ЄДРПОУ</p><h1>21560045</h1>
+          <h2>АТ «УКРПОШТА»</h2>
+          <p>Статус компанії</p><p>Зареєстровано</p>
+          <p>Повна назва</p><p>АКЦІОНЕРНЕ ТОВАРИСТВО «УКРПОШТА»</p>
+          <p>Дата заснування</p><p>15.12.1993</p>
+          <p>Адреса</p><p>01001, Україна, місто Київ, вулиця Хрещатик, будинок 22</p>
+          <p>Директор</p><p>Смілянський Ігор Юхимович</p>
+          <p>Основний вид діяльності</p><p>53.10 Діяльність національної пошти</p>
+          <p>Історична подія: припинення шляхом перетворення державного підприємства.</p>
+          <p>Рішення про припинення права користування земельною ділянкою.</p>
+        </main></body></html>
+        """
+
+        result = parse_company_page(html, "21560045")
+
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.company_data.status, "Зареєстровано")
+        self.assertNotIn("company_in_termination", result.court_data.risk_flags)
+
+    def test_parse_company_status_without_label_prefers_registered_over_document_termination_text(self):
+        from app.services.opendatabot_lookup import parse_company_page
+
+        html = """
+        <html><body><main>
+          <p>Код ЄДРПОУ</p><h1>21560045</h1>
+          <h2>АТ «УКРПОШТА»</h2>
+          <p>Компанія зареєстрована</p>
+          <p>Повна назва</p><p>АКЦІОНЕРНЕ ТОВАРИСТВО «УКРПОШТА»</p>
+          <p>Дата заснування</p><p>15.12.1993</p>
+          <p>Адреса</p><p>01001, Україна, місто Київ, вулиця Хрещатик, будинок 22</p>
+          <p>Директор</p><p>Смілянський Ігор Юхимович</p>
+          <p>Основний вид діяльності</p><p>53.10 Діяльність національної пошти</p>
+          <p>Судове рішення про припинення права користування майном.</p>
+        </main></body></html>
+        """
+
+        result = parse_company_page(html, "21560045")
+
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.company_data.status, "Зареєстровано")
+        self.assertNotIn("company_in_termination", result.court_data.risk_flags)
+
+    def test_parse_company_page_adds_bankruptcy_risk_flag_from_opendatabot_text(self):
+        from app.services.opendatabot_lookup import parse_company_page
+
+        html = """
+        <html><body><main>
+          <p>Код ЄДРПОУ</p><h1>25102871</h1>
+          <h2>ТОВ «УКРІНВЕСТ»</h2>
+          <p>Статус компанії</p><p>припинено</p>
+          <p>Повна назва</p><p>ТОВАРИСТВО З ОБМЕЖЕНОЮ ВІДПОВІДАЛЬНІСТЮ «УКРІНВЕСТ»</p>
+          <p>Дата заснування</p><p>27.08.1997</p>
+          <p>Адреса</p><p>49083, Україна, Дніпропетровська обл., місто Дніпро</p>
+          <p>Директор</p><p>Мотрич Іван Олександрович</p>
+          <p>Основний вид діяльності</p><p>73.20 Дослідження кон'юнктури ринку та виявлення громадської думки</p>
+          <p>Виконується процедура банкрутства</p>
+        </main></body></html>
+        """
+
+        result = parse_company_page(html, "25102871")
+
+        self.assertIn("bankruptcy_found", result.court_data.risk_flags)
+        self.assertIn("company_in_termination", result.court_data.risk_flags)
+
+    def test_parse_company_page_does_not_add_bankruptcy_flag_from_negative_phrase(self):
+        from app.services.opendatabot_lookup import parse_company_page
+
+        html = """
+        <html><body><main>
+          <p>Код ЄДРПОУ</p><h1>12345678</h1>
+          <h2>ТОВ «ПРИКЛАД»</h2>
+          <p>Статус</p><p>Зареєстровано</p>
+          <p>Повна назва</p><p>ТОВАРИСТВО З ОБМЕЖЕНОЮ ВІДПОВІДАЛЬНІСТЮ «ПРИКЛАД»</p>
+          <p>Дата заснування</p><p>15.01.2024</p>
+          <p>Адреса</p><p>01001, Україна, місто Київ</p>
+          <p>Директор</p><p>Іваненко Іван Іванович</p>
+          <p>Основний вид діяльності</p><p>46.90 Неспеціалізована оптова торгівля</p>
+          <p>Банкрутство не виявлено</p>
+        </main></body></html>
+        """
+
+        result = parse_company_page(html, "12345678")
+
+        self.assertNotIn("bankruptcy_found", result.court_data.risk_flags)
+
     def test_parse_company_page_rejects_page_with_different_edrpou(self):
         from app.services.opendatabot_lookup import parse_company_page
 
@@ -333,13 +445,18 @@ class OpendatabotLookupTests(unittest.TestCase):
         self.assertEqual(len(result.court_data.decisions), 1)
         self.assertTrue(result.court_data.decisions[0]["procedural_decision_detected"])
 
-    def test_lookup_company_defaults_to_one_court_decision_for_time_budget(self):
+    def test_lookup_company_defaults_to_three_court_decisions_for_report_links(self):
         from app.services.opendatabot_lookup import lookup_company
 
         fetched_decision_urls = []
+        third_decision_url = "https://opendatabot.ua/court/136256786-a37fd36115f607d7305448893333db5d"
+        html_with_three_court_links = COURT_LINKS_HTML.replace(
+            "</main>",
+            f'<a href="{third_decision_url}">Рішення</a></main>',
+        )
 
         def company_fetcher(edrpou: str) -> str:
-            return COURT_LINKS_HTML
+            return html_with_three_court_links
 
         def court_decision_fetcher(url: str) -> str:
             fetched_decision_urls.append(url)
@@ -351,8 +468,15 @@ class OpendatabotLookupTests(unittest.TestCase):
             court_decision_fetcher=court_decision_fetcher,
         )
 
-        self.assertEqual(fetched_decision_urls, [COURT_DECISION_URL])
-        self.assertEqual(len(result.court_data.decisions), 1)
+        self.assertEqual(
+            fetched_decision_urls,
+            [
+                COURT_DECISION_URL,
+                "https://opendatabot.ua/court/136256785-a37fd36115f607d7305448893333db4c",
+                third_decision_url,
+            ],
+        )
+        self.assertEqual(len(result.court_data.decisions), 3)
 
     def test_parse_financial_table(self):
         from app.services.opendatabot_lookup import parse_company_page

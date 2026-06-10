@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+from datetime import UTC, datetime
 from html import unescape
 from html.parser import HTMLParser
-from typing import Callable
+from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.models.clarity import (
@@ -18,6 +22,8 @@ from app.utils.validators import is_valid_edrpou
 
 
 BASE_CLARITY_URL = "https://clarity-project.info/edr/{edrpou}"
+BASE_CLARITY_API_URL = "https://clarity-project.info/api/edr.info/{edrpou}"
+CLARITY_API_KEY_ENV = "CLARITY_API_KEY"
 HTTP_TIMEOUT_SECONDS = 8.0
 FOUND = "found"
 NOT_FOUND = "not_found"
@@ -80,6 +86,11 @@ def build_clarity_url(edrpou: str) -> str:
     return BASE_CLARITY_URL.format(edrpou=edrpou)
 
 
+def build_clarity_api_url(edrpou: str, api_key: str) -> str:
+    query = urlencode({"key": api_key})
+    return f"{BASE_CLARITY_API_URL.format(edrpou=edrpou)}?{query}"
+
+
 def fetch_clarity_page(url: str) -> str:
     request = Request(
         url,
@@ -93,9 +104,25 @@ def fetch_clarity_page(url: str) -> str:
         return response.read().decode(charset, errors="replace")
 
 
+def fetch_clarity_api_json(url: str) -> Mapping[str, Any]:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "RiskUA Bot MVP/0.1",
+            "Accept": "application/json",
+        },
+    )
+    with urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        raw_body = response.read().decode(charset, errors="replace")
+    payload = json.loads(raw_body)
+    return payload if isinstance(payload, Mapping) else {}
+
+
 def lookup_clarity_by_edrpou(
     edrpou: str,
     fetcher: Callable[[str], str] = fetch_clarity_page,
+    api_fetcher: Callable[[str], Mapping[str, Any]] = fetch_clarity_api_json,
 ) -> ClarityData:
     source_url = build_clarity_url(edrpou)
     if not is_valid_edrpou(edrpou):
@@ -105,6 +132,33 @@ def lookup_clarity_by_edrpou(
             edrpou=edrpou,
             error="invalid_edrpou",
         )
+
+    api_key = os.environ.get(CLARITY_API_KEY_ENV, "").strip()
+    if api_key:
+        try:
+            payload = api_fetcher(build_clarity_api_url(edrpou, api_key))
+        except HTTPError as exc:
+            close_error_response(exc)
+            if exc.code == 404:
+                return ClarityData(
+                    source_url=source_url,
+                    status=NOT_FOUND,
+                    edrpou=edrpou,
+                )
+            return ClarityData(
+                source_url=source_url,
+                status=SOURCE_ERROR,
+                edrpou=edrpou,
+                error=f"clarity_api_http_{exc.code}",
+            )
+        except (json.JSONDecodeError, URLError, TimeoutError, OSError, ValueError):
+            return ClarityData(
+                source_url=source_url,
+                status=SOURCE_ERROR,
+                edrpou=edrpou,
+                error="clarity_api_source_error",
+            )
+        return parse_clarity_api_payload(payload, edrpou, source_url)
 
     try:
         html = fetcher(source_url)
@@ -131,6 +185,58 @@ def lookup_clarity_by_edrpou(
         )
 
     return parse_clarity_page(html, edrpou, source_url)
+
+
+def parse_clarity_api_payload(payload: Mapping[str, Any], edrpou: str, source_url: str) -> ClarityData:
+    error = payload.get("error")
+    if isinstance(error, Mapping):
+        code = clean_api_error_code(error.get("code"))
+        return ClarityData(
+            source_url=source_url,
+            status=SOURCE_ERROR,
+            edrpou=edrpou,
+            error=f"clarity_api_{code}",
+        )
+
+    payload_edrpou = normalize_api_edrpou(
+        first_api_value(
+            payload,
+            "edr",
+            "Edr",
+            "edrpou",
+            "EDRPOU",
+        )
+        or first_api_value(api_mapping(payload.get("edr_data")), "edr", "Edr", "edrpou")
+    )
+    if payload_edrpou and payload_edrpou != edrpou:
+        return ClarityData(
+            source_url=source_url,
+            status=PARSE_ERROR,
+            edrpou=edrpou,
+            error="edrpou_mismatch",
+        )
+
+    company = parse_api_company(payload)
+    if company is None:
+        return ClarityData(
+            source_url=source_url,
+            status=PARSE_ERROR,
+            edrpou=edrpou,
+            error="company_name_missing",
+            parse_warnings=["Не вдалося визначити назву компанії у Clarity API"],
+        )
+
+    tax = parse_api_tax(payload)
+    signals = parse_api_signals(payload)
+    return ClarityData(
+        source_url=source_url,
+        status=FOUND,
+        edrpou=edrpou,
+        company=company,
+        tax=tax,
+        signals=signals,
+        risk_flags=build_risk_flags(company, tax, signals),
+    )
 
 
 def parse_clarity_page(html: str, edrpou: str, source_url: str) -> ClarityData:
@@ -187,6 +293,252 @@ def close_error_response(error: HTTPError) -> None:
         error.close()
     except OSError:
         pass
+
+
+def parse_api_company(payload: Mapping[str, Any]) -> ClarityCompany | None:
+    edr_data = api_mapping(payload.get("edr_data"))
+    contact = api_mapping(payload.get("contact"))
+    contacts = api_mapping(first_api_value(edr_data, "contacts", "contact"))
+    name = first_string(
+        first_api_value(edr_data, "name", "Name"),
+        first_api_value(edr_data, "shortName", "short_name"),
+        first_api_value(payload, "name", "Name"),
+    )
+    if not name:
+        return None
+
+    company = ClarityCompany(
+        name=name,
+        status=first_string(
+            first_api_value(edr_data, "statusName", "status_name"),
+            first_api_value(edr_data, "status", "Status"),
+            first_api_value(payload, "status", "Status"),
+        ),
+        registration_date=parse_api_date(
+            first_api_value(edr_data, "registration", "Registration", "registered_at", "registration_date")
+        ),
+        director=extract_api_director(edr_data),
+        website=first_string(
+            first_api_value(contacts, "web", "website", "url"),
+            first_api_value(contact, "web", "website", "url"),
+        ),
+        statutory_capital_uah=parse_api_money(first_api_value(edr_data, "capital", "Capital")),
+        main_activity=format_api_activity(first_api_value(edr_data, "activity", "activities", "Activity")),
+    )
+    return company
+
+
+def parse_api_tax(payload: Mapping[str, Any]) -> ClarityTax:
+    tax_debt_value = first_api_value(payload, "tax_debt", "taxDebt", "TaxDebt")
+    tax_debt_mapping = api_mapping(tax_debt_value)
+    tax_debt_amount = first_api_number(
+        tax_debt_value,
+        first_api_value(tax_debt_mapping, "amount", "sum", "total", "debt", "tax_debt_amount_uah"),
+    )
+    tax_debt = api_bool(tax_debt_value)
+    if tax_debt_amount is not None:
+        tax_debt = tax_debt_amount > 0
+
+    esv_debt_value = first_api_value(payload, "esv_debt", "esvDebt", "unified_social_tax_debt")
+    return ClarityTax(
+        tax_debt=tax_debt,
+        tax_debt_amount_uah=tax_debt_amount,
+        tax_debt_as_of=first_string(
+            first_api_value(tax_debt_mapping, "actual_date", "as_of", "date", "updated", "updated_at")
+        ),
+        esv_debt=api_bool(esv_debt_value),
+        vat_active=api_bool(first_api_value(payload, "vat_active", "vatActive", "is_vat_payer")),
+        single_tax_active=api_bool(first_api_value(payload, "single_tax_active", "singleTaxActive", "is_single_tax_payer")),
+    )
+
+
+def parse_api_signals(payload: Mapping[str, Any]) -> ClaritySignals:
+    return ClaritySignals(
+        bankruptcy_count=api_count(
+            first_api_value(payload, "bankruptcy_count", "bankruptcies_count", "bankruptcy", "bankruptcies")
+        ),
+        enforcement_proceedings_count=api_count(
+            first_api_value(
+                payload,
+                "enforcement_proceedings_count",
+                "executive_proceedings_count",
+                "enforcements_count",
+                "enforcements",
+            )
+        ),
+        inspections_count=api_count(first_api_value(payload, "inspections_count", "inspections")),
+        edr_history_count=api_count(first_api_value(payload, "history", "history_count", "edr_history_count")),
+        licenses_count=api_count(first_api_value(payload, "licenses_count", "licenses")),
+        prozorro_sales_count=api_count(first_api_value(payload, "prozorro_sales_count", "prozorro_sales")),
+    )
+
+
+def extract_api_director(edr_data: Mapping[str, Any]) -> str | None:
+    direct_value = first_string(
+        first_api_value(edr_data, "director", "head", "manager", "chief"),
+    )
+    if direct_value:
+        return direct_value
+
+    signers = first_api_value(edr_data, "signers", "Signers")
+    if isinstance(signers, list):
+        for signer in signers:
+            signer_mapping = api_mapping(signer)
+            name = first_string(first_api_value(signer_mapping, "name", "Name", "person", "Person"))
+            if name:
+                return name
+    return None
+
+
+def format_api_activity(value: Any) -> str | None:
+    if isinstance(value, list):
+        candidates = [api_mapping(item) for item in value]
+        selected = next(
+            (
+                item
+                for item in candidates
+                if api_bool(first_api_value(item, "is_primary", "primary", "main", "isMain")) is True
+            ),
+            candidates[0] if candidates else {},
+        )
+        return format_api_activity(selected)
+    if isinstance(value, Mapping):
+        code = first_string(first_api_value(value, "code", "Code", "KVED", "kved"))
+        name = first_string(first_api_value(value, "name", "Name", "text", "Text"))
+        if code and name:
+            return f"{code} {name}"
+        return code or name
+    return first_string(value)
+
+
+def parse_api_date(value: Any) -> str | None:
+    if isinstance(value, Mapping):
+        return parse_api_date(first_api_value(value, "date", "Date", "timestamp", "registered_at"))
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, UTC).strftime("%d.%m.%Y")
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit() and len(stripped) >= 9:
+            return datetime.fromtimestamp(int(stripped), UTC).strftime("%d.%m.%Y")
+        return stripped or None
+    return None
+
+
+def parse_api_money(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, Mapping):
+        return parse_api_money(first_api_value(value, "amount", "value", "sum"))
+    if isinstance(value, str):
+        return parse_money(value)
+    return None
+
+
+def first_api_number(*values: Any) -> float | None:
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            parsed = parse_money(value)
+            if parsed is not None:
+                return parsed
+        if isinstance(value, Mapping):
+            parsed = first_api_number(
+                first_api_value(value, "amount", "value", "sum", "total", "debt", "tax_debt_amount_uah")
+            )
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def api_count(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        return parse_first_int(value)
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, Mapping):
+        direct = first_api_value(value, "count", "total", "total_found", "value")
+        if direct is not None and direct is not value:
+            return api_count(direct)
+        return len(value) if value else None
+    return None
+
+
+def api_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, Mapping):
+        direct = first_api_value(value, "has_debt", "exists", "active", "value", "amount", "sum", "total", "debt")
+        if direct is not None and direct is not value:
+            return api_bool(direct)
+        return True if value else None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if not lowered:
+            return None
+        if lowered in {"0", "false", "no", "ні", "none", "null"}:
+            return False
+        if any(marker in lowered for marker in ("відсут", "немає", "не має", "не вияв")):
+            return False
+        if lowered in {"1", "true", "yes", "так"} or any(marker in lowered for marker in ("наяв", "актив", "вияв")):
+            return True
+    return None
+
+
+def api_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def first_api_value(mapping: Mapping[str, Any], *keys: str) -> Any:
+    if not mapping:
+        return None
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    lowered = {str(key).lower(): value for key, value in mapping.items()}
+    for key in keys:
+        if key.lower() in lowered:
+            return lowered[key.lower()]
+    return None
+
+
+def first_string(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str):
+            stripped = normalize_text(value)
+            if stripped:
+                return stripped
+        elif isinstance(value, (int, float)):
+            return str(value)
+    return None
+
+
+def normalize_api_edrpou(value: Any) -> str | None:
+    if value is None:
+        return None
+    match = re.search(r"\b\d{8}\b", str(value))
+    return match.group(0) if match else None
+
+
+def clean_api_error_code(value: Any) -> str:
+    if value is None:
+        return "error"
+    normalized = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value).strip())
+    return normalized or "error"
 
 
 def is_not_found_page(text: str, edrpou: str) -> bool:

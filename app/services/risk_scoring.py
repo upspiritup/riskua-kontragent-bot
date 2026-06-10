@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 
 RISK_FLAG_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -174,10 +178,130 @@ RISK_FLAG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "label_uk": "Є судові згадки",
         "description": "Знайдено судові справи або згадки, їх зміст треба перевірити окремо.",
     },
+    "several_court_mentions_found": {
+        "weight": 7,
+        "label_uk": "Кілька судових документів",
+        "description": "Знайдено кілька судових документів; потрібна ручна перевірка їх змісту.",
+    },
     "many_court_mentions_found": {
         "weight": 10,
         "label_uk": "Значна кількість судових згадок",
         "description": "Є значна кількість судових згадок у відкритих джерелах.",
+    },
+    "very_many_court_mentions_found": {
+        "weight": 0,
+        "label_uk": "Дуже велика кількість судових згадок",
+        "description": "Є дуже велика кількість судових документів або згадок у відкритих джерелах.",
+    },
+    "negative_equity_found": {
+        "weight": 45,
+        "label_uk": "Від’ємний власний капітал",
+        "description": "Фінансова звітність показує від’ємний власний капітал.",
+    },
+    "severe_negative_equity": {
+        "weight": 65,
+        "label_uk": "Суттєво від’ємний власний капітал",
+        "description": "Власний капітал суттєво від’ємний або зобов’язання значно перевищують активи.",
+    },
+    "liabilities_exceed_assets": {
+        "weight": 35,
+        "label_uk": "Зобов’язання перевищують активи",
+        "description": "Фінансова звітність показує, що зобов’язання перевищують активи.",
+    },
+    "negative_equity_multiple_years": {
+        "weight": 65,
+        "label_uk": "Від’ємний власний капітал кілька років",
+        "description": "Власний капітал був від’ємним у кількох звітних періодах.",
+    },
+    "losses_with_negative_equity": {
+        "weight": 55,
+        "label_uk": "Збиток на фоні від’ємного капіталу",
+        "description": "Компанія має збиток і від’ємний власний капітал.",
+    },
+    "small_loss_found": {
+        "weight": 2,
+        "label_uk": "Невеликий збиток",
+        "description": "Компанія має невеликий збиток, але сам по собі він не є критичним.",
+    },
+    "medium_loss_found": {
+        "weight": 5,
+        "label_uk": "Помірний збиток",
+        "description": "Компанія має помірний збиток.",
+    },
+    "large_loss_found": {
+        "weight": 10,
+        "label_uk": "Значний збиток",
+        "description": "Компанія має збиток; його масштаб потрібно оцінювати відносно активів і доходу.",
+    },
+    "very_large_loss_found": {
+        "weight": 20,
+        "label_uk": "Великий збиток",
+        "description": "Компанія має великий збиток, що потребує уваги.",
+    },
+    "critical_loss_found": {
+        "weight": 35,
+        "label_uk": "Критичний збиток",
+        "description": "Компанія має критичний збиток відносно активів, доходу або на фоні проблемного балансу.",
+    },
+    "weak_financial_position": {
+        "weight": 40,
+        "label_uk": "Слабкий фінансовий стан",
+        "description": "Одночасно виявлено кілька сильних фінансових проблем.",
+    },
+    "positive_profit_found": {
+        "weight": 0,
+        "label_uk": "Прибуткова діяльність",
+        "description": "Фінансова звітність показує прибуток.",
+    },
+    "positive_equity_found": {
+        "weight": 0,
+        "label_uk": "Позитивний власний капітал",
+        "description": "Фінансова звітність показує позитивний власний капітал.",
+    },
+    "equity_growth_found": {
+        "weight": 0,
+        "label_uk": "Зростання власного капіталу",
+        "description": "Власний капітал зростає за доступними фінансовими періодами.",
+    },
+    "assets_exceed_liabilities": {
+        "weight": 0,
+        "label_uk": "Активи перевищують зобов’язання",
+        "description": "Фінансова звітність показує, що активи перевищують зобов’язання.",
+    },
+    "strong_revenue_found": {
+        "weight": 0,
+        "label_uk": "Значний дохід",
+        "description": "Компанія має значний дохід за останній фінансовий період.",
+    },
+    "strong_financial_profile": {
+        "weight": 0,
+        "label_uk": "Стабільний фінансовий профіль",
+        "description": "Фінансовий профіль виглядає стабільним: прибуток, позитивний капітал, активи перевищують зобов’язання та є значний дохід.",
+    },
+    "very_strong_financial_profile": {
+        "weight": 0,
+        "label_uk": "Дуже сильний фінансовий профіль",
+        "description": "Компанія має дуже сильний фінансовий профіль за доходом або активами на фоні здорових фінансових показників.",
+    },
+    "low_authorized_capital_found": {
+        "weight": 8,
+        "label_uk": "Дуже низький статутний капітал",
+        "description": "Статутний капітал дуже низький.",
+    },
+    "financial_data_missing": {
+        "weight": 12,
+        "label_uk": "Повні фінансові показники не знайдено",
+        "description": "Повні фінансові показники у доступних джерелах не знайдено.",
+    },
+    "prozorro_unconfirmed_search_noise": {
+        "weight": 2,
+        "label_uk": "Багато непідтверджених збігів у Prozorro",
+        "description": "У Prozorro є багато пошукових збігів без підтвердженої участі компанії.",
+    },
+    "weak_public_financial_profile": {
+        "weight": 5,
+        "label_uk": "Слабко підтверджений публічний фінансовий профіль",
+        "description": "Публічний фінансовий профіль слабко підтверджений.",
     },
     "low_statutory_capital_with_debt": {
         "weight": 5,
@@ -244,6 +368,56 @@ RISK_FLAG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "label_uk": "Скарги в Prozorro, пов'язані з постачальником",
         "description": "Знайдено скарги, які прямо стосуються компанії, її документів або дій.",
     },
+    "prozorro_sale_risky_auction": {
+        "weight": 35,
+        "label_uk": "Ризиковий аукціон Prozorro.Sale",
+        "description": "У Prozorro.Sale знайдено підтверджений аукціон з негативним маркером.",
+    },
+    "prozorro_sale_failed_obligations": {
+        "weight": 45,
+        "label_uk": "Невиконання умов у Prozorro.Sale",
+        "description": "У Prozorro.Sale знайдено підтверджений маркер невиконання умов переможцем.",
+    },
+    "prozorro_sale_refusal_to_sign": {
+        "weight": 45,
+        "label_uk": "Відмова від підписання у Prozorro.Sale",
+        "description": "У Prozorro.Sale знайдено підтверджений маркер відмови або непідписання документів.",
+    },
+    "prozorro_sale_disqualified_winner": {
+        "weight": 45,
+        "label_uk": "Дискваліфікація переможця у Prozorro.Sale",
+        "description": "У Prozorro.Sale знайдено підтверджений маркер дискваліфікації переможця.",
+    },
+    "prozorro_sale_nonpayment": {
+        "weight": 45,
+        "label_uk": "Несплата у Prozorro.Sale",
+        "description": "У Prozorro.Sale знайдено підтверджений маркер несплати або невнесення платежу.",
+    },
+    "prozorro_sale_multiple_unsuccessful_auctions": {
+        "weight": 0,
+        "label_uk": "Повторні або неуспішні аукціони Prozorro.Sale",
+        "description": "У Prozorro.Sale знайдено неуспішний або повторний аукціон, але негативної дії саме з боку компанії не підтверджено.",
+    },
+    "prozorro_sale_bankruptcy_asset_sale": {
+        "weight": 70,
+        "label_uk": "Продаж майна банкрута у Prozorro.Sale",
+        "description": "У Prozorro.Sale знайдено підтверджений продаж майна, пов’язаного з ліквідаційною масою або банкрутством.",
+    },
+    "prozorro_sale_debtor_mention": {
+        "weight": 0,
+        "label_uk": "Інформаційна згадка в Prozorro.Sale",
+        "description": "Компанія згадується у лотах, пов’язаних із дебіторською заборгованістю. Цей сигнал сам по собі не доводить банкрутство.",
+    },
+    "prozorro_sale_informational_auction_mention": {
+        "weight": 0,
+        "label_uk": "Інформаційна згадка аукціону Prozorro.Sale",
+        "description": "У Prozorro.Sale знайдено аукціон з участю або згадкою компанії, але негативної дії саме з боку компанії не підтверджено.",
+    },
+    "prozorro_search_results_found": {
+        "weight": 0,
+        "label_uk": "Пошукові результати Prozorro",
+        "description": "У пошуку Prozorro є результати без підтвердженого негативного факту щодо компанії.",
+    },
     "young_company": {
         "weight": 15,
         "label_uk": "Молода компанія",
@@ -296,17 +470,103 @@ LEVEL_LABELS_UK = {
 
 NO_HARD_FACT_SCORE_CAP = 65
 CONFLICT_SCORE_CAP = 65
+NON_MAXIMUM_TOP_SCORE_CAP = 80
 HARD_FACT_TYPES = {
     "company_not_found",
     "company_inactive",
     "company_in_termination",
     "bankruptcy_found",
     "sanctions_found",
+    "negative_equity_found",
+    "severe_negative_equity",
+    "liabilities_exceed_assets",
+    "negative_equity_multiple_years",
+    "losses_with_negative_equity",
+    "weak_financial_position",
     "large_tax_debt_found",
     "enforcement_found",
     "tax_debt_enforcement_found",
     "salary_debt_enforcement_found",
     "debt_collection_found",
+    "fine_or_penalty_enforcement_found",
+    "prozorro_sale_failed_obligations",
+    "prozorro_sale_refusal_to_sign",
+    "prozorro_sale_disqualified_winner",
+    "prozorro_sale_nonpayment",
+    "prozorro_sale_bankruptcy_asset_sale",
+}
+MAXIMUM_RISK_SINGLE_FACT_TYPES = {
+    "company_not_found",
+}
+TERMINAL_CRITICAL_FACT_TYPES = {
+    "bankruptcy_found",
+    "sanctions_found",
+    "company_inactive",
+    "company_in_termination",
+}
+SUPPORTING_CRITICAL_FACT_TYPES = {
+    "enforcement_found",
+    "tax_debt_enforcement_found",
+    "salary_debt_enforcement_found",
+    "debt_collection_found",
+    "fine_or_penalty_enforcement_found",
+    "large_tax_debt_found",
+    "severe_negative_equity",
+    "negative_equity_multiple_years",
+    "losses_with_negative_equity",
+    "weak_financial_position",
+    "prozorro_sale_failed_obligations",
+    "prozorro_sale_refusal_to_sign",
+    "prozorro_sale_disqualified_winner",
+    "prozorro_sale_nonpayment",
+    "prozorro_sale_bankruptcy_asset_sale",
+}
+NEGATIVE_FINANCIAL_REASON_TYPES = {
+    "negative_equity_found",
+    "severe_negative_equity",
+    "liabilities_exceed_assets",
+    "negative_equity_multiple_years",
+    "losses_with_negative_equity",
+    "small_loss_found",
+    "medium_loss_found",
+    "large_loss_found",
+    "very_large_loss_found",
+    "critical_loss_found",
+    "weak_financial_position",
+}
+POSITIVE_FINANCIAL_REDUCER_TYPES = {
+    "strong_financial_profile",
+    "very_strong_financial_profile",
+}
+POSITIVE_FINANCIAL_REDUCER_BLOCKING_TYPES = {
+    "bankruptcy_found",
+    "sanctions_found",
+    "company_inactive",
+    "company_in_termination",
+    "criminal_case_found",
+}
+SIGNIFICANT_DEBT_OR_ENFORCEMENT_TYPES = {
+    "large_tax_debt_found",
+    "enforcement_found",
+    "many_enforcement_proceedings_found",
+    "tax_debt_enforcement_found",
+    "salary_debt_enforcement_found",
+    "debt_collection_found",
+    "fine_or_penalty_enforcement_found",
+}
+SIGNIFICANT_DEBT_REDUCER_FLOOR = 50
+STRONG_FINANCIAL_PROFILE_REDUCER = 8
+VERY_STRONG_FINANCIAL_PROFILE_REDUCER = 15
+MAXIMUM_INFORMATION_FLOOR = 10
+MINIMUM_COMPANY_SCORE = 5
+INFORMATION_FLOORS_BY_TYPE = {
+    "court_cases_found": 1,
+    "several_court_mentions_found": 8,
+    "many_court_mentions_found": 5,
+    "very_many_court_mentions_found": 8,
+    "prozorro_sale_debtor_mention": 3,
+    "prozorro_sale_informational_auction_mention": 3,
+    "prozorro_search_results_found": 1,
 }
 
 
@@ -317,16 +577,83 @@ def calculate_final_risk(risk_flags: list[Any]) -> dict:
         reason["type"] in HARD_FACT_TYPES and reason.get("status") != "conflict"
         for reason in reasons
     )
-    score = min(sum(reason["weight"] for reason in reasons), 100)
+    maximum_risk_confirmed = has_maximum_risk_cluster(reasons)
+    terminal_critical_fact_present = has_terminal_critical_fact(reasons)
+    raw_score = min(sum(reason["weight"] for reason in reasons), 100)
+    score = raw_score
+    applied_caps: list[str] = []
+    cap_reason: str | None = None
     if not hard_fact_present:
         score = min(score, NO_HARD_FACT_SCORE_CAP)
+        applied_caps.append("no_hard_fact_score_cap")
+        cap_reason = "no_hard_fact"
+    if not maximum_risk_confirmed and not terminal_critical_fact_present and score >= 90:
+        score = min(score, NON_MAXIMUM_TOP_SCORE_CAP)
+        applied_caps.append("non_maximum_top_score_cap")
+        cap_reason = cap_reason or "non_maximum_top_score"
+    elif not maximum_risk_confirmed and score >= 100:
+        score = min(score, NON_MAXIMUM_TOP_SCORE_CAP)
+        applied_caps.append("non_maximum_top_score_cap")
+        cap_reason = cap_reason or "non_maximum_top_score"
     if conflicts:
         score = min(score, CONFLICT_SCORE_CAP)
+        applied_caps.append("conflict_score_cap")
+        cap_reason = "conflict"
         level = "manual_review"
+        positive_financial_reducer = 0
+        positive_financial_reducer_floor = None
+        positive_financial_reducer_blocked_by = []
+        score_after_reducer = score
+        information_floor = 0
+        minimum_score_floor = MINIMUM_COMPANY_SCORE
+        score = max(score, minimum_score_floor)
     else:
+        max_hard_flag_weight = max_hard_weight(reasons)
+        score = max(score, max_hard_flag_weight)
+        score = apply_minimum_hard_fact_score(score, reasons)
+        positive_financial_reducer, positive_financial_reducer_blocked_by = positive_financial_reducer_amount(reasons)
+        score, positive_financial_reducer_floor = apply_positive_financial_reducer(
+            score,
+            reasons,
+            positive_financial_reducer,
+        )
+        score_after_reducer = score
+        information_floor = calculate_information_floor(reasons)
+        minimum_score_floor = MINIMUM_COMPANY_SCORE
+        score = max(score_after_reducer, information_floor, minimum_score_floor)
         level = risk_level_from_score(score)
+    max_hard_flag_weight = max_hard_weight(reasons)
+    hard_flags = [
+        reason["type"]
+        for reason in reasons
+        if reason["type"] in HARD_FACT_TYPES and reason.get("status") != "conflict"
+    ]
+    applied_flags = [reason["type"] for reason in reasons]
+    logger.info(
+        "Risk score breakdown raw_score=%s final_score=%s level=%s applied_flags=%s "
+        "applied_caps=%s hard_flags=%s max_hard_flag_weight=%s cap_reason=%s "
+        "positive_financial_reducer=%s positive_financial_reducer_floor=%s "
+        "positive_financial_reducer_blocked_by=%s score_after_reducer=%s "
+        "information_floor=%s minimum_score_floor=%s",
+        raw_score,
+        score,
+        level,
+        applied_flags,
+        applied_caps,
+        hard_flags,
+        max_hard_flag_weight,
+        cap_reason,
+        positive_financial_reducer,
+        positive_financial_reducer_floor,
+        positive_financial_reducer_blocked_by,
+        score_after_reducer,
+        information_floor,
+        minimum_score_floor,
+    )
     return {
         "score": score,
+        "raw_score": raw_score,
+        "final_score": score,
         "level": level,
         "label_uk": LEVEL_LABELS_UK[level],
         "reasons": reasons,
@@ -334,7 +661,118 @@ def calculate_final_risk(risk_flags: list[Any]) -> dict:
         "conflicts": conflicts,
         "manual_review_required": bool(conflicts),
         "hard_fact_present": hard_fact_present,
+        "maximum_risk_confirmed": maximum_risk_confirmed,
+        "terminal_critical_fact_present": terminal_critical_fact_present,
+        "applied_caps": applied_caps,
+        "hard_flags": hard_flags,
+        "applied_flags": applied_flags,
+        "max_hard_flag_weight": max_hard_flag_weight,
+        "cap_reason": cap_reason,
+        "positive_financial_reducer": positive_financial_reducer,
+        "positive_financial_reducer_floor": positive_financial_reducer_floor,
+        "positive_financial_reducer_blocked_by": positive_financial_reducer_blocked_by,
+        "score_after_reducer": score_after_reducer,
+        "information_floor": information_floor,
+        "minimum_score_floor": minimum_score_floor,
     }
+
+
+def max_hard_weight(reasons: list[dict]) -> int:
+    hard_weights = [
+        reason["weight"]
+        for reason in reasons
+        if reason["type"] in HARD_FACT_TYPES and reason.get("status") != "conflict"
+    ]
+    return max(hard_weights, default=0)
+
+
+def positive_financial_reducer_amount(reasons: list[dict]) -> tuple[int, list[str]]:
+    found_types = {
+        reason["type"]
+        for reason in reasons
+        if reason.get("status") != "conflict"
+    }
+    if not found_types.intersection(POSITIVE_FINANCIAL_REDUCER_TYPES):
+        return 0, []
+
+    blocked_by = sorted(found_types.intersection(POSITIVE_FINANCIAL_REDUCER_BLOCKING_TYPES | NEGATIVE_FINANCIAL_REASON_TYPES))
+    if blocked_by:
+        return 0, blocked_by
+
+    if "very_strong_financial_profile" in found_types:
+        return VERY_STRONG_FINANCIAL_PROFILE_REDUCER, []
+    if "strong_financial_profile" in found_types:
+        return STRONG_FINANCIAL_PROFILE_REDUCER, []
+    return 0, []
+
+
+def apply_positive_financial_reducer(score: int, reasons: list[dict], reducer: int) -> tuple[int, int | None]:
+    if reducer <= 0 or score <= 0:
+        return score, None
+
+    floor = positive_financial_reducer_floor(reasons)
+    reduced_score = max(score - reducer, 0)
+    if floor is not None:
+        if score <= floor:
+            return score, floor
+        reduced_score = max(reduced_score, floor)
+    return min(score, reduced_score), floor
+
+
+def positive_financial_reducer_floor(reasons: list[dict]) -> int | None:
+    found_types = {
+        reason["type"]
+        for reason in reasons
+        if reason.get("status") != "conflict"
+    }
+    if found_types.intersection(SIGNIFICANT_DEBT_OR_ENFORCEMENT_TYPES):
+        return SIGNIFICANT_DEBT_REDUCER_FLOOR
+    return None
+
+
+def calculate_information_floor(reasons: list[dict]) -> int:
+    floor = 0
+    for reason in reasons:
+        if reason.get("status") == "conflict":
+            continue
+        floor = max(floor, INFORMATION_FLOORS_BY_TYPE.get(reason["type"], 0))
+    return min(floor, MAXIMUM_INFORMATION_FLOOR)
+
+
+def apply_minimum_hard_fact_score(score: int, reasons: list[dict]) -> int:
+    found_types = {
+        reason["type"]
+        for reason in reasons
+        if reason.get("status") != "conflict"
+    }
+    if "bankruptcy_found" in found_types:
+        score = max(score, 80)
+    if {"bankruptcy_found", "company_in_termination"}.issubset(found_types):
+        score = max(score, 90)
+    if {"bankruptcy_found", "prozorro_sale_bankruptcy_asset_sale"}.issubset(found_types):
+        score = max(score, 90)
+    return score
+
+
+def has_maximum_risk_cluster(reasons: list[dict]) -> bool:
+    found_types = {
+        reason["type"]
+        for reason in reasons
+        if reason.get("status") != "conflict"
+    }
+    if found_types.intersection(MAXIMUM_RISK_SINGLE_FACT_TYPES):
+        return True
+    return bool(
+        found_types.intersection(TERMINAL_CRITICAL_FACT_TYPES)
+        and found_types.intersection(SUPPORTING_CRITICAL_FACT_TYPES)
+    )
+
+
+def has_terminal_critical_fact(reasons: list[dict]) -> bool:
+    return any(
+        reason["type"] in TERMINAL_CRITICAL_FACT_TYPES and reason.get("status") != "conflict"
+        for reason in reasons
+    )
 
 
 def dedupe_risk_flags(risk_flags: list[Any]) -> tuple[list[dict], list[dict]]:
@@ -455,7 +893,7 @@ def normalize_risk_flag(raw_flag: Any) -> dict | None:
     if not flag_type:
         return None
 
-    canonical_type = RISK_FLAG_ALIASES.get(flag_type, flag_type)
+    canonical_type = classify_prozorro_sale_flag(flag_type, raw_text) or RISK_FLAG_ALIASES.get(flag_type, flag_type)
     if canonical_type in {
         "source_unavailable",
         "tax_source_unavailable",
@@ -477,6 +915,43 @@ def normalize_risk_flag(raw_flag: Any) -> dict | None:
         "match_type": match_type,
         "checked_at": checked_at,
     }
+
+
+def classify_prozorro_sale_flag(flag_type: str, raw_text: str | None) -> str | None:
+    canonical_type = RISK_FLAG_ALIASES.get(flag_type, flag_type)
+    if canonical_type != "prozorro_sale_risky_auction":
+        return None
+
+    lowered = (raw_text or "").casefold()
+    if any(marker in lowered for marker in ("ліквідаційна маса", "ліквідаційної маси", "банкрут")):
+        return "prozorro_sale_bankruptcy_asset_sale"
+    if any(marker in lowered for marker in ("переможець не виконав умови", "не виконав умови")):
+        return "prozorro_sale_failed_obligations"
+    if any(marker in lowered for marker in ("дискваліф", "відхилен")):
+        return "prozorro_sale_disqualified_winner"
+    if any(marker in lowered for marker in ("несплат", "не сплат", "не вніс оплат")):
+        return "prozorro_sale_nonpayment"
+    if any(
+        marker in lowered
+        for marker in (
+            "відмова від підписання",
+            "не підписав протокол",
+            "не підписав договір",
+        )
+    ):
+        return "prozorro_sale_refusal_to_sign"
+    if any(
+        marker in lowered
+        for marker in (
+            "аукціон не відбувся",
+            "торги не відбулися",
+            "не відбувся",
+            "повторний аукціон",
+            "повторні торги",
+        )
+    ):
+        return "prozorro_sale_informational_auction_mention"
+    return canonical_type
 
 
 def risk_level_from_score(score: int) -> str:

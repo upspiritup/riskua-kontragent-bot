@@ -192,9 +192,7 @@ class ContactsSummaryTests(unittest.TestCase):
         lines = build_contacts_summary_lines(summary)
         text = "\n".join(lines)
 
-        self.assertIn("Сайт: не вдалося автоматично перевірити", text)
-        self.assertIn("Телефон: не вдалося автоматично перевірити", text)
-        self.assertIn("Email: не вдалося автоматично перевірити", text)
+        self.assertEqual(lines, [])
         self.assertNotIn("Сайт: не знайдено у перевірених джерелах", text)
         self.assertNotIn("not_found", text)
         self.assertNotIn("unavailable", text)
@@ -225,11 +223,10 @@ class ContactsSummaryTests(unittest.TestCase):
             },
         }
 
-        text = "\n".join(build_contacts_summary_lines(summary))
+        lines = build_contacts_summary_lines(summary)
+        text = "\n".join(lines)
 
-        self.assertIn("Сайт: не вдалося автоматично перевірити", text)
-        self.assertIn("Телефон: не вдалося автоматично перевірити", text)
-        self.assertIn("Email: не вдалося автоматично перевірити", text)
+        self.assertEqual(lines, [])
         self.assertNotIn("не знайдено у перевірених джерелах", text)
         self.assertNotIn("unavailable", text)
 
@@ -246,11 +243,10 @@ class ContactsSummaryTests(unittest.TestCase):
             "source_statuses": {"ua-region.com.ua": "not_found", "business-guide.com.ua": "not_found"},
         }
 
-        text = "\n".join(build_contacts_summary_lines(summary))
+        lines = build_contacts_summary_lines(summary)
+        text = "\n".join(lines)
 
-        self.assertIn("Сайт: не знайдено в доступних джерелах", text)
-        self.assertIn("Телефон: не знайдено в доступних джерелах", text)
-        self.assertIn("Email: не знайдено в доступних джерелах", text)
+        self.assertEqual(lines, [])
         self.assertNotIn("Пошук контактів неповний", text)
 
 

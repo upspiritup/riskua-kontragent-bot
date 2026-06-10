@@ -79,6 +79,101 @@ class ClarityLookupTests(unittest.TestCase):
         self.assertEqual(timeouts, [service.HTTP_TIMEOUT_SECONDS])
         self.assertLessEqual(service.HTTP_TIMEOUT_SECONDS, 10)
 
+    def test_lookup_uses_clarity_api_key_without_exposing_it(self):
+        from app.services.clarity_lookup import lookup_clarity_by_edrpou
+
+        requested_urls: list[str] = []
+
+        def fake_api_fetcher(url: str) -> dict:
+            requested_urls.append(url)
+            return {
+                "edr": "32697149",
+                "name": "ТОВ ТЕСТ",
+                "edr_data": {
+                    "name": "ТОВ ТЕСТ",
+                    "statusName": "Зареєстровано",
+                    "capital": "1000",
+                    "activity": [
+                        {
+                            "code": "46.90",
+                            "name": "Неспеціалізована оптова торгівля",
+                            "is_primary": True,
+                        }
+                    ],
+                    "registration": {"date": "2003-10-31"},
+                    "signers": [{"name": "Іваненко Іван Іванович"}],
+                },
+                "tax_debt": {"amount": 0, "actual_date": "2026-01-01"},
+                "history": 4,
+                "licenses_count": 2,
+            }
+
+        def fail_html_fetcher(url: str) -> str:
+            raise AssertionError(f"HTML fetcher should not be used when API key is configured: {url}")
+
+        with patch.dict("os.environ", {"CLARITY_API_KEY": "test-secret"}, clear=False):
+            result = lookup_clarity_by_edrpou(
+                "32697149",
+                fetcher=fail_html_fetcher,
+                api_fetcher=fake_api_fetcher,
+            )
+
+        self.assertEqual(result.status, "found")
+        self.assertEqual(result.source_url, "https://clarity-project.info/edr/32697149")
+        self.assertNotIn("test-secret", result.model_dump_json())
+        self.assertIn("https://clarity-project.info/api/edr.info/32697149?", requested_urls[0])
+        self.assertIn("key=test-secret", requested_urls[0])
+        self.assertEqual(result.company.name, "ТОВ ТЕСТ")
+        self.assertEqual(result.company.status, "Зареєстровано")
+        self.assertEqual(result.company.director, "Іваненко Іван Іванович")
+        self.assertEqual(result.company.main_activity, "46.90 Неспеціалізована оптова торгівля")
+        self.assertFalse(result.tax.tax_debt)
+        self.assertEqual(result.signals.edr_history_count, 4)
+        self.assertEqual(result.signals.licenses_count, 2)
+
+    def test_clarity_api_error_returns_source_error_without_key(self):
+        from app.services.clarity_lookup import lookup_clarity_by_edrpou
+
+        with patch.dict("os.environ", {"CLARITY_API_KEY": "test-secret"}, clear=False):
+            result = lookup_clarity_by_edrpou(
+                "32697149",
+                api_fetcher=lambda url: {"error": {"code": 401, "text": "Invalid API key"}},
+            )
+
+        self.assertEqual(result.status, "source_error")
+        self.assertEqual(result.error, "clarity_api_401")
+        self.assertNotIn("test-secret", result.model_dump_json())
+
+    def test_clarity_api_transport_error_does_not_expose_key(self):
+        from app.services.clarity_lookup import lookup_clarity_by_edrpou
+
+        def failing_api_fetcher(url: str) -> dict:
+            raise ValueError(f"failed url={url}")
+
+        with patch.dict("os.environ", {"CLARITY_API_KEY": "test-secret"}, clear=False):
+            result = lookup_clarity_by_edrpou("32697149", api_fetcher=failing_api_fetcher)
+
+        self.assertEqual(result.status, "source_error")
+        self.assertEqual(result.error, "clarity_api_source_error")
+        self.assertNotIn("test-secret", result.model_dump_json())
+
+    def test_clarity_api_boolean_tax_debt_does_not_create_fake_amount(self):
+        from app.services.clarity_lookup import lookup_clarity_by_edrpou
+
+        def fake_api_fetcher(url: str) -> dict:
+            return {
+                "edr": "32697149",
+                "name": "ТОВ ТЕСТ",
+                "edr_data": {"name": "ТОВ ТЕСТ", "statusName": "Зареєстровано"},
+                "tax_debt": True,
+            }
+
+        with patch.dict("os.environ", {"CLARITY_API_KEY": "test-secret"}, clear=False):
+            result = lookup_clarity_by_edrpou("32697149", api_fetcher=fake_api_fetcher)
+
+        self.assertTrue(result.tax.tax_debt)
+        self.assertIsNone(result.tax.tax_debt_amount_uah)
+
     def test_parse_company_fields(self):
         from app.services.clarity_lookup import build_clarity_url, parse_clarity_page
 

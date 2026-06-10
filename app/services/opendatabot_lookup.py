@@ -160,7 +160,7 @@ def lookup_company(
     edrpou: str,
     fetcher: Callable[[str], str] = fetch_company_page,
     court_decision_fetcher: Callable[[str], str] | None = fetch_court_decision_page,
-    max_court_decisions: int = 1,
+    max_court_decisions: int = 3,
 ) -> CompanyLookupResult:
     source_url = build_opendatabot_url(edrpou)
     if not validate_edrpou(edrpou):
@@ -238,10 +238,13 @@ def parse_company_page(html: str, edrpou: str) -> CompanyLookupResult:
     financial_data = parse_financial_data(parts, parse_warnings)
     registration_changes = parse_registration_changes(parts, parse_warnings)
     court_data = parse_court_data(parts)
+    court_data.risk_flags = unique_strings(
+        [*court_data.risk_flags, *detect_opendatabot_page_risk_flags(parts, company_data.status)]
+    )
     court_data.source_urls = extract_court_decision_links(html)
     if court_data.source_urls and not court_data.has_court_mentions:
         court_data.has_court_mentions = True
-        court_data.risk_flags = ["court_mentions_found"]
+        court_data.risk_flags = unique_strings([*court_data.risk_flags, "court_mentions_found"])
     risk_input = build_risk_input(company_data, financial_data, registration_changes, court_data, parts)
 
     return CompanyLookupResult(
@@ -711,6 +714,17 @@ def contains_any(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in text for marker in markers)
 
 
+def unique_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
 def extract_visible_text(html: str) -> list[str]:
     parser = VisibleTextParser()
     parser.feed(html)
@@ -773,7 +787,7 @@ def extract_company_name(parts: list[str], edrpou: str) -> str | None:
 
 
 def extract_company_status(parts: list[str]) -> str | None:
-    labelled = extract_field(parts, ("Статус", "Стан"))
+    labelled = extract_field(parts, ("Статус компанії", "Статус", "Стан"))
     if labelled:
         return labelled
 
@@ -782,10 +796,12 @@ def extract_company_status(parts: list[str]) -> str | None:
         return "Зареєстровано"
     if "компанія зареєстрована" in joined_text or "підприємство" in joined_text and "зареєстровано" in joined_text:
         return "Зареєстровано"
-    if "в стані припинення" in joined_text or "у стані припинення" in joined_text:
-        return "В стані припинення"
-    if "компанія припинена" in joined_text or "підприємство припинено" in joined_text:
+    if has_positive_termination_context(joined_text):
+        if "в стані припинення" in joined_text or "у стані припинення" in joined_text:
+            return "В стані припинення"
         return "Припинено"
+    if has_positive_bankruptcy_context(joined_text):
+        return "Виконується процедура банкрутства"
     return None
 
 
@@ -800,6 +816,84 @@ def has_safe_negative_status(text: str) -> bool:
             "не перебуває у стані припинення",
         )
     )
+
+
+def detect_opendatabot_page_risk_flags(parts: list[str], company_status: str | None = None) -> list[str]:
+    text = join_text_fragments(parts).lower()
+    flags: list[str] = []
+    if has_positive_bankruptcy_context(text):
+        flags.append("bankruptcy_found")
+    if is_positive_company_termination_status(company_status):
+        flags.append("company_in_termination")
+    return unique_strings(flags)
+
+
+def has_positive_bankruptcy_context(text: str) -> bool:
+    lowered = (text or "").lower()
+    if has_bankruptcy_negative_context(lowered):
+        return False
+    return contains_any(
+        lowered,
+        (
+            "виконується процедура банкрутства",
+            "перебуває у процедурі банкрутства",
+            "перебуває в процедурі банкрутства",
+            "процедура банкрутства",
+            "справа про банкрутство",
+            "справі про банкрутство",
+            "відкрито провадження про банкрутство",
+            "порушено справу про банкрутство",
+            "визнано банкрутом",
+            "боржника банкрутом",
+            "ліквідаційна маса банкрута",
+            "ліквідаційної маси банкрута",
+        ),
+    )
+
+
+def has_bankruptcy_negative_context(text: str) -> bool:
+    lowered = (text or "").lower()
+    return contains_any(
+        lowered,
+        (
+            "банкрутство не виявлено",
+            "банкрутство відсут",
+            "банкрутство не знайдено",
+            "справи про банкрутство відсут",
+            "відомості про банкрутство відсут",
+            "не перебуває у процедурі банкрутства",
+            "не перебуває в процедурі банкрутства",
+        ),
+    )
+
+
+def has_positive_termination_context(text: str) -> bool:
+    lowered = (text or "").lower()
+    if has_safe_negative_status(lowered):
+        return False
+    return contains_any(
+        lowered,
+        (
+            "статус компанії припинено",
+            "статус компанії: припинено",
+            "статус компанії в стані припинення",
+            "статус компанії: в стані припинення",
+            "статус компанії у стані припинення",
+            "статус компанії: у стані припинення",
+            "компанія припинена",
+            "підприємство припинено",
+        ),
+    )
+
+
+def is_positive_company_termination_status(status: str | None) -> bool:
+    normalized = " ".join((status or "").casefold().split()).strip(" .:;")
+    return normalized in {
+        "в стані припинення",
+        "у стані припинення",
+        "припиняється",
+        "припинено",
+    }
 
 
 def is_likely_company_name(text: str) -> bool:
@@ -893,6 +987,7 @@ def next_value(parts: list[str], start_index: int) -> str | None:
 def is_label(text: str) -> bool:
     return text.rstrip(":") in {
         "Код ЄДРПОУ",
+        "Статус компанії",
         "Статус",
         "Стан",
         "Дата заснування",

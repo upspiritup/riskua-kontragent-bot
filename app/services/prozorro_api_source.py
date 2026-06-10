@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlencode
@@ -21,30 +22,44 @@ async def fetch_recent_prozorro_procurements_by_edrpou(
     edrpou: str,
     max_pages: int = 3,
     limit: int = 100,
+    timeout_seconds: float = 60.0,
     *,
     fetch_json: FetchJson | None = None,
 ) -> list[ProzorroProcurement]:
     logger = logging.getLogger(__name__)
     logger.info("Prozorro live source start edrpou=%s", edrpou)
-    fetch = fetch_json or fetch_json_url
     records: list[ProzorroProcurement] = []
     offset: str | None = None
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
 
     try:
         for page_number in range(1, max(0, max_pages) + 1):
+            if search_time_exhausted(deadline):
+                log_live_time_budget_reached(logger, edrpou, records)
+                break
             feed_url = build_tenders_feed_url(limit=limit, offset=offset)
-            feed_payload = await maybe_await(fetch(feed_url))
+            feed_payload = await fetch_json_with_deadline(fetch_json, feed_url, deadline)
             tenders = feed_payload.get("data") if isinstance(feed_payload, dict) else []
             if not isinstance(tenders, list):
                 tenders = []
             logger.info("Prozorro feed page fetched page=%s count=%s", page_number, len(tenders))
 
             for tender_ref in tenders:
+                if search_time_exhausted(deadline):
+                    log_live_time_budget_reached(logger, edrpou, records)
+                    return records
                 tender_id = tender_ref.get("id") if isinstance(tender_ref, dict) else None
                 if not tender_id:
                     continue
                 detail_url = build_tender_detail_url(str(tender_id))
-                detail_payload = await maybe_await(fetch(detail_url))
+                try:
+                    detail_payload = await fetch_json_with_deadline(fetch_json, detail_url, deadline)
+                except Exception as exc:
+                    if search_time_exhausted(deadline):
+                        log_live_time_budget_reached(logger, edrpou, records)
+                        return records
+                    logger.info("Prozorro tender detail fetch failed tender_id=%s error=%s", tender_id, exc)
+                    continue
                 logger.info("Prozorro tender detail fetched tender_id=%s", tender_id)
                 detail = detail_payload.get("data") if isinstance(detail_payload, dict) else None
                 if not isinstance(detail, dict):
@@ -65,6 +80,9 @@ async def fetch_recent_prozorro_procurements_by_edrpou(
             if not next_offset or next_offset == offset:
                 break
             offset = str(next_offset)
+    except TimeoutError:
+        log_live_time_budget_reached(logger, edrpou, records)
+        return records
     except Exception as exc:
         logger.info("Prozorro live source error edrpou=%s error=%s", edrpou, exc)
         raise
@@ -85,10 +103,10 @@ def build_tender_detail_url(tender_id: str) -> str:
 
 
 async def fetch_json_url(url: str) -> dict[str, Any]:
-    return await asyncio.to_thread(fetch_json_url_sync, url)
+    return await asyncio.to_thread(fetch_json_url_sync, url, HTTP_TIMEOUT_SECONDS)
 
 
-def fetch_json_url_sync(url: str) -> dict[str, Any]:
+def fetch_json_url_sync(url: str, timeout_seconds: float = HTTP_TIMEOUT_SECONDS) -> dict[str, Any]:
     request = Request(
         url,
         headers={
@@ -96,15 +114,45 @@ def fetch_json_url_sync(url: str) -> dict[str, Any]:
             "Accept": "application/json",
         },
     )
-    with urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+    with urlopen(request, timeout=timeout_seconds) as response:
         charset = response.headers.get_content_charset() or "utf-8"
         return json.loads(response.read().decode(charset, errors="replace"))
 
 
-async def maybe_await(value: dict[str, Any] | Awaitable[dict[str, Any]]) -> dict[str, Any]:
+async def fetch_json_with_deadline(
+    fetch_json: FetchJson | None,
+    url: str,
+    deadline: float,
+) -> dict[str, Any]:
+    remaining = remaining_search_seconds(deadline)
+    if remaining <= 0:
+        raise TimeoutError("Prozorro live search time budget exhausted")
+    if fetch_json is None:
+        return await asyncio.to_thread(fetch_json_url_sync, url, min(HTTP_TIMEOUT_SECONDS, remaining))
+
+    value = fetch_json(url)
     if inspect.isawaitable(value):
-        return await value
+        try:
+            return await asyncio.wait_for(value, timeout=remaining)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError("Prozorro live search time budget exhausted") from exc
     return value
+
+
+def remaining_search_seconds(deadline: float) -> float:
+    return deadline - time.monotonic()
+
+
+def search_time_exhausted(deadline: float) -> bool:
+    return remaining_search_seconds(deadline) <= 0
+
+
+def log_live_time_budget_reached(
+    logger: logging.Logger,
+    edrpou: str,
+    records: list[ProzorroProcurement],
+) -> None:
+    logger.info("Prozorro live source time budget reached edrpou=%s found=%s", edrpou, len(records))
 
 
 def normalize_tender_detail_for_edrpou(
