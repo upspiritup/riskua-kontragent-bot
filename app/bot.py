@@ -448,10 +448,6 @@ def is_reportable_prozorro_analysis(prozorro_analysis: ProzorroAnalysis | None) 
     )
 
 
-def is_prozorro_source_included(prozorro_analysis: ProzorroAnalysis | None) -> bool:
-    return is_reportable_prozorro_analysis(prozorro_analysis) or has_prozorro_search_summary(prozorro_analysis)
-
-
 def get_prozorro_source_label(prozorro_analysis: ProzorroAnalysis | None) -> str | None:
     if is_reportable_prozorro_analysis(prozorro_analysis):
         return "Prozorro"
@@ -609,31 +605,6 @@ def build_prozorro_search_text_match_note_lines(confirmed_participation_count: i
     ]
 
 
-def build_prozorro_search_item_lines(items: list[dict]) -> list[str]:
-    if not items:
-        return []
-
-    lines = ["Перші закупівлі у видачі:"]
-    for index, item in enumerate(items[:3], start=1):
-        tender_id = first_nonempty_text(item, "tenderID", "id") or "без ID"
-        title = truncate_text(first_nonempty_text(item, "title") or "без назви", 120)
-        lines.append(f"{index}. {tender_id} — {title}")
-
-        details: list[str] = []
-        status = first_nonempty_text(item, "status")
-        buyer_name = first_nonempty_text(item, "buyer_name", "buyer")
-        expected_value = item.get("expected_value_uah")
-        if status:
-            details.append(f"Статус: {status}")
-        if buyer_name:
-            details.append(f"замовник: {truncate_text(buyer_name, 80)}")
-        if isinstance(expected_value, int | float):
-            details.append(f"очікувана сума: {format_uah(expected_value)}")
-        if details:
-            lines.append("; ".join(details) + ".")
-    return lines
-
-
 def build_prozorro_search_risk_scan_line(items: list[dict], *, confirmed_participation_count: int = 1) -> str:
     checked_count = len(items)
     marker_count = count_prozorro_search_potential_critical_signals(items)
@@ -692,12 +663,6 @@ def first_nonempty_text(item: dict, *keys: str) -> str | None:
         if text:
             return text
     return None
-
-
-def truncate_text(text: str, max_length: int) -> str:
-    if len(text) <= max_length:
-        return text
-    return text[: max(0, max_length - 1)].rstrip() + "…"
 
 
 def build_prozorro_tender_fallback_lines(company: CompanyData | None) -> list[str]:
@@ -1085,31 +1050,6 @@ def format_int(value: int) -> str:
     return f"{value:,}".replace(",", " ")
 
 
-def build_good_lines(
-    lookup_result: CompanyLookupResult,
-    *,
-    status: str | None,
-    company_age_years: int | None,
-    kved: str | None,
-    tax_data: dict | None = None,
-    clarity_data: ClarityData | None = None,
-) -> list[str]:
-    lines: list[str] = []
-    if status and "зареєстр" in status.lower():
-        lines.append("✅ Компанія має активний/зареєстрований статус у доступних даних.")
-    if company_age_years is not None and company_age_years >= 3:
-        lines.append("✅ Компанія працює тривалий час.")
-    if kved:
-        lines.append("ℹ️ Основний КВЕД визначено.")
-    if lookup_result.risk_input.has_financial_history:
-        lines.append("ℹ️ Знайдено фінансові дані.")
-    if not lookup_result.risk_input.has_court_mentions:
-        lines.append("✅ Судові згадки не знайдені у відкритому блоці Opendatabot.")
-    lines.extend(build_tax_good_lines(tax_data))
-    lines.extend(build_clarity_good_lines(clarity_data))
-    return lines
-
-
 LOSS_ASSESSMENT_REASON_TYPES = {
     "small_loss_found",
     "medium_loss_found",
@@ -1352,45 +1292,11 @@ def build_clarity_enforcement_assessment_lines(clarity_data: ClarityData | None)
     return [f"⚠️ Виконавчі провадження: {signals.enforcement_proceedings_count}"]
 
 
-def build_caution_lines(
-    lookup_result: CompanyLookupResult,
-    clarity_data: ClarityData | None,
-    youcontrol_data: dict | None,
-    debtors_registry_data: dict | None,
-    tax_data: dict | None,
-    final_risk: dict,
-) -> list[str]:
-    lines: list[str] = []
-    reason_types = {reason.get("type") for reason in final_risk.get("reasons", [])}
-    if lookup_result.risk_input.company_age_years is not None and lookup_result.risk_input.company_age_years < 3:
-        lines.append("ℹ️ Компанія зареєстрована відносно нещодавно.")
-    if lookup_result.risk_input.has_court_mentions and "court_cases_found" not in reason_types:
-        lines.append(format_court_mentions_line(get_court_mentions_count(lookup_result)))
-    lines.extend(line for line in build_debtors_signal_lines(debtors_registry_data) if line)
-    lines.extend(line for line in build_tax_signal_lines(tax_data) if line)
-    lines.extend(line for line in build_clarity_caution_lines(clarity_data) if line)
-    return dedupe_lines(lines)
-
-
 def has_confirmed_bankruptcy_reason(final_risk: dict) -> bool:
     return any(
         reason.get("type") == "bankruptcy_found" and reason.get("status") != "conflict"
         for reason in final_risk.get("reasons", [])
     )
-
-
-def build_top_risk_reason_lines(
-    final_risk: dict,
-    *,
-    lookup_result: CompanyLookupResult | None = None,
-    limit: int = 3,
-) -> list[str]:
-    reasons = sorted(
-        [reason for reason in final_risk["reasons"] if reason.get("weight", 0) > 0],
-        key=lambda reason: reason["weight"],
-        reverse=True,
-    )
-    return [f"• {user_risk_reason_text(reason, lookup_result)}" for reason in reasons[:limit]]
 
 
 def user_risk_reason_text(reason: dict, lookup_result: CompanyLookupResult | None = None) -> str:
@@ -1552,13 +1458,6 @@ def format_court_decision_lines(index: int, decision: dict) -> list[str]:
     return lines
 
 
-def short_text(value: str, limit: int) -> str:
-    value = value.strip()
-    if len(value) <= limit:
-        return value
-    return f"{value[: limit - 1].rstrip()}…"
-
-
 def dedupe_lines(lines: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -1568,46 +1467,6 @@ def dedupe_lines(lines: list[str]) -> list[str]:
         seen.add(line)
         result.append(line)
     return result
-
-
-def build_signal_lines(
-    lookup_result: CompanyLookupResult,
-    *,
-    effective_company_age_years: int | None = None,
-    effective_kved: str | None = None,
-) -> list[str]:
-    risk_input = lookup_result.risk_input
-    company_age_years = (
-        effective_company_age_years
-        if effective_company_age_years is not None
-        else risk_input.company_age_years
-    )
-    main_activity_defined = bool(effective_kved or risk_input.main_activity_code)
-    signals: list[str] = []
-    if company_age_years is None:
-        signals.append("ℹ️ Не вдалося визначити вік компанії.")
-    elif company_age_years >= 3:
-        signals.append("✅ Компанія працює тривалий час.")
-    else:
-        signals.append("ℹ️ Компанія зареєстрована відносно нещодавно.")
-
-    if main_activity_defined:
-        signals.append("ℹ️ Основний КВЕД визначено.")
-    else:
-        signals.append("ℹ️ Основний КВЕД не вдалося визначити.")
-
-    if risk_input.has_financial_history:
-        signals.append("ℹ️ Знайдено фінансові дані.")
-    else:
-        signals.append("ℹ️ Фінансові дані не знайдені у відкритому блоці.")
-
-    if risk_input.has_court_mentions:
-        court_mentions_count = risk_input.court_mentions_count or risk_input.total_court_cases_found
-        signals.append(format_court_mentions_line(court_mentions_count))
-    else:
-        signals.append("✅ Судові згадки не знайдені у відкритому блоці.")
-
-    return signals
 
 
 def calculate_company_age_years(registration_date: str | None) -> int | None:
@@ -1624,93 +1483,6 @@ def calculate_company_age_years(registration_date: str | None) -> int | None:
 
     today = date.today()
     return today.year - registered_at.year - ((today.month, today.day) < (registered_at.month, registered_at.day))
-
-
-def build_debtors_signal_lines(debtors_registry_data: dict | None) -> list[str]:
-    if not debtors_registry_data or not debtors_registry_data.get("found"):
-        return []
-
-    risk_flags = set(debtors_registry_data.get("risk_flags") or [])
-    items_count = int(debtors_registry_data.get("items_count") or 0)
-    lines: list[str] = []
-    if "debtor_registry_found" in risk_flags:
-        lines.append("⚠️ Компанія знайдена в Єдиному реєстрі боржників.")
-    if "multiple_debtor_records" in risk_flags or items_count >= 3:
-        lines.append("⚠️ Знайдено кілька записів у Єдиному реєстрі боржників.")
-    if "salary_debt_enforcement_found" in risk_flags:
-        lines.append("⚠️ Є виконавче провадження щодо заборгованості із заробітної плати.")
-    if "court_fee_enforcement_found" in risk_flags:
-        lines.append("⚠️ Є виконавчі провадження щодо стягнення судового збору.")
-    if "debt_collection_found" in risk_flags:
-        lines.append("⚠️ Є виконавче провадження щодо стягнення коштів, заборгованості або платежів до бюджету.")
-    if "fine_or_penalty_enforcement_found" in risk_flags:
-        lines.append("⚠️ Є виконавче провадження щодо штрафів, пені або санкцій.")
-    if "tax_debt_enforcement_found" in risk_flags:
-        lines.append("⚠️ Виявлено виконавче провадження на користь ДПС / державного бюджету.")
-    return lines
-
-
-def build_tax_good_lines(tax_data: dict | None) -> list[str]:
-    if not tax_data or not tax_data.get("checked") or tax_data.get("error"):
-        return []
-    tax_debt = tax_data.get("tax_debt") or {}
-    if tax_debt.get("found") is False:
-        return ["✅ Податковий борг у доступному наборі ДПС не знайдено."]
-    return []
-
-
-def build_tax_signal_lines(tax_data: dict | None) -> list[str]:
-    if not tax_data or not tax_data.get("checked") or tax_data.get("error"):
-        return []
-
-    risk_flags = set(tax_data.get("risk_flags") or [])
-    lines: list[str] = []
-    if "tax_debt_found" in risk_flags:
-        lines.append("⚠️ Знайдено податковий борг у доступних даних ДПС.")
-    if "large_tax_debt_found" in risk_flags:
-        lines.append(
-            "⚠️ Сума податкового боргу виглядає суттєвою, тому передоплата потребує додаткової перевірки."
-        )
-    if "vat_registration_cancelled" in risk_flags or "vat_status_problem" in risk_flags:
-        lines.append("⚠️ Є ознаки проблеми з ПДВ-статусом.")
-    return lines
-
-
-def build_website_check_lines(domain_reputation_data: dict | None) -> list[str]:
-    if not domain_reputation_data or not domain_reputation_data.get("checked"):
-        return []
-
-    if domain_reputation_data.get("error") == "website_unavailable" or not domain_reputation_data.get("found"):
-        return [
-            "⚠️ Сайт не вдалося перевірити автоматично. Це не є доказом ризику, але потребує ручної перевірки."
-        ]
-
-    flags = set(domain_reputation_data.get("risk_flags") or [])
-    lines: list[str] = []
-    http = domain_reputation_data.get("http") or {}
-    ssl_info = domain_reputation_data.get("ssl") or {}
-    dns_info = domain_reputation_data.get("dns") or {}
-    if http.get("status_code") and int(http["status_code"]) < 400:
-        lines.append("✅ Сайт відкривається")
-    if ssl_info.get("present"):
-        lines.append("✅ HTTPS працює")
-    if dns_info.get("found"):
-        lines.append("✅ DNS-записи знайдено")
-    if "company_edrpou_not_found_on_website" in flags:
-        lines.append("⚠️ На сайті не знайдено ЄДРПОУ компанії")
-    if "company_name_not_found_on_website" in flags:
-        lines.append("⚠️ На сайті не знайдено назву компанії")
-    if "free_email_used" in flags:
-        lines.append("⚠️ Знайдено тільки безкоштовну email-адресу")
-    if "ssl_missing" in flags:
-        lines.append("⚠️ HTTPS/SSL не підтверджено")
-    if "dns_not_found" in flags:
-        lines.append("⚠️ DNS-записи домену не підтверджено")
-    if "suspicious_redirects" in flags:
-        lines.append("⚠️ Сайт має підозрілі редиректи")
-    if "empty_website" in flags:
-        lines.append("⚠️ Сайт відкривається, але сторінка майже порожня")
-    return dedupe_lines(lines)
 
 
 def build_contact_lines(domain_reputation_data: dict | None) -> list[str]:
@@ -1776,98 +1548,6 @@ def format_contact_value(field: str, value: str) -> str:
         if national.startswith("0522") and len(national) == 10:
             return f"+38 ({national[:4]}) {national[4:6]}-{national[6:8]}-{national[8:]}"
     return value
-
-
-def contact_confidence_label(confidence: str | None) -> str:
-    return {
-        "high": "високий",
-        "medium": "середній",
-        "low": "низький",
-        "unknown": "невідомий",
-    }.get(confidence or "unknown", "невідомий")
-
-
-def contact_source_label(source: str) -> str:
-    return {
-        "ua-region.com.ua": "UA-REGION",
-        "prat.ua/pat.ua": "PRAT/PAT",
-        "smida.gov.ua": "SMIDA",
-        "business-guide.com.ua": "Business Guide",
-    }.get(source, source)
-
-
-def build_conflict_lines(final_risk: dict) -> list[str]:
-    conflicts = final_risk.get("conflicts") or []
-    lines: list[str] = []
-    for conflict in conflicts:
-        found_sources = ", ".join(conflict.get("found_sources") or [])
-        not_found_sources = ", ".join(conflict.get("not_found_sources") or [])
-        lines.append(
-            f"• {conflict.get('label_uk')}: одні джерела підтверджують ({found_sources}), інші не підтверджують ({not_found_sources}). Потребує ручної перевірки."
-        )
-    return lines
-
-
-def build_clarity_good_lines(clarity_data: ClarityData | None) -> list[str]:
-    if clarity_data is None or clarity_data.status not in {CLARITY_FOUND, CLARITY_PARTIAL}:
-        return []
-
-    tax = clarity_data.tax
-    signals = clarity_data.signals
-    lines: list[str] = []
-    if signals and signals.bankruptcy_count == 0:
-        lines.append("✅ Банкрутство у Clarity не виявлено.")
-    if tax and tax.tax_debt is False:
-        lines.append("✅ Податковий борг у Clarity не виявлено.")
-    if tax and tax.esv_debt is False:
-        lines.append("✅ Борг ЄСВ у Clarity не виявлено.")
-    return lines
-
-
-def build_clarity_caution_lines(clarity_data: ClarityData | None) -> list[str]:
-    if clarity_data is None or clarity_data.status not in {CLARITY_FOUND, CLARITY_PARTIAL}:
-        return []
-
-    tax = clarity_data.tax
-    signals = clarity_data.signals
-    lines: list[str] = []
-    if signals and signals.bankruptcy_count and signals.bankruptcy_count > 0:
-        lines.append("• У Clarity є ознаки банкрутства, потрібно звірити актуальний стан справ.")
-    if tax and tax.tax_debt is True:
-        lines.append("• У Clarity є ознака податкового боргу.")
-    if tax and tax.esv_debt is True:
-        lines.append("• У Clarity є ознака боргу ЄСВ.")
-    if signals and signals.enforcement_proceedings_count is not None:
-        if signals.enforcement_proceedings_count > 100:
-            lines.append("• велика кількість записів, пов’язаних з виконавчими провадженнями")
-        elif signals.enforcement_proceedings_count > 0:
-            lines.append(f"• Виконавчі провадження: {signals.enforcement_proceedings_count}")
-    return lines
-
-
-def build_clarity_signal_lines(clarity_data: ClarityData | None) -> list[str]:
-    if clarity_data is None or clarity_data.status not in {CLARITY_FOUND, CLARITY_PARTIAL}:
-        return []
-
-    tax = clarity_data.tax
-    signals = clarity_data.signals
-    lines = ["", "Додаткові сигнали Clarity:"]
-    if signals and signals.bankruptcy_count is not None:
-        lines.append(
-            f"• Банкрутство: {'виявлено' if signals.bankruptcy_count > 0 else 'не виявлено'}"
-        )
-    if tax and tax.tax_debt is not None:
-        lines.append(f"• Податковий борг: {'виявлено' if tax.tax_debt else 'відсутній'}")
-    if tax and tax.esv_debt is not None:
-        lines.append(f"• Борг ЄСВ: {'виявлено' if tax.esv_debt else 'відсутній'}")
-    if signals and signals.enforcement_proceedings_count is not None:
-        if signals.enforcement_proceedings_count > 100:
-            lines.append("• велика кількість записів, пов’язаних з виконавчими провадженнями")
-        else:
-            lines.append(f"• Виконавчі провадження: {signals.enforcement_proceedings_count}")
-    if signals and signals.edr_history_count is not None:
-        lines.append(f"• Історія ЄДР: {signals.edr_history_count} записів")
-    return lines if len(lines) > 2 else []
 
 
 def build_limitation_lines(
@@ -1948,27 +1628,6 @@ def clarity_risk_level(clarity_data: ClarityData | None) -> str:
     if clarity_data is None or not clarity_data.risk_flags:
         return "low"
     return highest_risk_level([flag.level for flag in clarity_data.risk_flags])
-
-
-def combined_risk_level(
-    clarity_data: ClarityData | None,
-    youcontrol_data: dict | None = None,
-) -> str:
-    return calculate_final_risk(
-        collect_source_risk_flags(CompanyLookupResult(status="found", edrpou="00000000"), clarity_data, youcontrol_data)
-    )["level"]
-
-
-def build_plain_language_summary(final_risk: dict) -> str:
-    if final_risk.get("manual_review_required") or final_risk["level"] == "manual_review":
-        return "Є суперечливі дані між джерелами. Перед передоплатою потрібна ручна перевірка першоджерел."
-    if final_risk["level"] == "critical":
-        return "Є сильні ризикові ознаки. Передоплата без додаткової перевірки може бути небезпечною."
-    if final_risk["level"] == "high":
-        return "Є кілька суттєвих сигналів, які варто перевірити перед оплатою або договором."
-    if final_risk["level"] == "medium":
-        return "Критичних ознак не видно, але є сигнали, які потребують додаткової перевірки."
-    return "У доступних джерелах немає суттєвих ризикових ознак, але базову перевірку документів все одно варто зробити."
 
 
 def build_recommendation_text(risk_level: str) -> str:
@@ -2879,21 +2538,6 @@ def is_critical_loss(
     return False
 
 
-def loss_ratio_values(loss_abs: int, assets: int | None, revenue: int | None) -> list[float]:
-    ratios: list[float] = []
-    if assets is not None and assets > 0:
-        ratios.append(loss_abs / assets)
-    if revenue is not None and revenue > 0:
-        ratios.append(loss_abs / revenue)
-    return ratios
-
-
-def adjacent_loss_flag(flag_type: str, step: int) -> str:
-    index = LOSS_FLAG_ORDER.index(flag_type)
-    next_index = min(max(index + step, 0), len(LOSS_FLAG_ORDER) - 1)
-    return LOSS_FLAG_ORDER[next_index]
-
-
 def company_statutory_capital_uah(result: CompanyLookupResult) -> int | None:
     if result.risk_input.statutory_capital_uah is not None:
         return result.risk_input.statutory_capital_uah
@@ -3452,10 +3096,6 @@ def is_successful_debtors_registry(debtors_registry_data: dict | None) -> bool:
 
 def is_successful_tax(tax_data: dict | None) -> bool:
     return bool(tax_data and tax_data.get("checked") and tax_data.get("found"))
-
-
-def is_checked_domain_reputation(domain_reputation_data: dict | None) -> bool:
-    return bool(domain_reputation_data and domain_reputation_data.get("checked"))
 
 
 def is_useful_domain_reputation_source(domain_reputation_data: dict | None) -> bool:
