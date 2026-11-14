@@ -219,3 +219,7 @@ __marimo__/
 
 # Runtime check history with Telegram user ids and lookup snapshots
 data/checks/
+
+# Кеші перевірок нової версії
+.mypy_cache/
+.ruff_cache/

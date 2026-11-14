@@ -1,0 +1,72 @@
+# Нова версія RiskUA на одному сервері: база -> міграції -> бот.
+#
+#   docker compose up -d --build    зібрати й запустити все
+#   docker compose up -d db         лише база (для розробки і check.py --all)
+#   docker compose logs -f bot      журнал бота
+#
+# POSTGRES_PASSWORD і RISKUA_BOT_TOKEN беруться з файла .env поруч (див. .env.example).
+
+name: riskua
+
+x-environment: &environment
+  RISKUA_ENV: production
+  RISKUA_LOG_LEVEL: ${RISKUA_LOG_LEVEL:-INFO}
+  RISKUA_DATABASE_URL: postgresql://riskua:${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD у .env}@db:5432/riskua
+
+x-logging: &logging
+  # Журнали Docker без обмеження з часом займуть увесь диск сервера.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile
+  image: riskua:latest
+  logging: *logging
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: riskua
+      POSTGRES_USER: riskua
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?задайте POSTGRES_PASSWORD у .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Лише для цього комп'ютера: база не повинна бути видна з інтернету.
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U riskua -d riskua"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+
+  migrate:
+    <<: *app
+    command: ["python", "-m", "riskua.db.migrate"]
+    restart: "no"
+    environment:
+      <<: *environment
+    depends_on:
+      db:
+        condition: service_healthy
+
+  bot:
+    <<: *app
+    command: ["python", "-m", "riskua.bot"]
+    restart: unless-stopped
+    environment:
+      <<: *environment
+      RISKUA_BOT_TOKEN: ${RISKUA_BOT_TOKEN:?задайте RISKUA_BOT_TOKEN у .env}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:

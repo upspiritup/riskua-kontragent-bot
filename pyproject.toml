@@ -1,0 +1,200 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "riskua"
+dynamic = ["version"]
+description = "Telegram-бот для швидкої перевірки українського контрагента за ЄДРПОУ"
+requires-python = ">=3.12"
+# Кожна залежність має рядок у docs/decisions.md: навіщо і чому не вистачило наявних.
+dependencies = [
+    "aiogram>=3.20,<4",
+    "psycopg[binary]>=3.2,<4",
+    "python-dotenv>=1.0,<2",
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+# ruff і mypy закріплені точно: нова версія може додати перевірки й зламати check.py.
+dev = [
+    "mypy==2.4.1",
+    "pytest>=8.3,<10",
+    "pytest-cov>=6,<8",
+    "ruff==0.17.5",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "riskua.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["riskua*"]
+
+[tool.setuptools.package-data]
+"riskua.db" = ["migrations/*.sql"]
+
+# ---------------------------------------------------------------------------
+# Цифри правил проєкту (docs/project-rules.md). Зміна будь-якої цифри — окремий
+# коміт, який чіпає лише цей файл, docs/project-rules.md і docs/decisions.md.
+# ---------------------------------------------------------------------------
+
+[tool.riskua]
+# Старий бот: перевірки його не чіпають, доки завдання 1.12 його не видалить.
+# Той самий перелік — у [tool.ruff] extend-exclude.
+legacy = ["app/**", "main.py", "tests/legacy/**"]
+
+[tool.riskua.limits]
+file_lines = 400        # файл у riskua/ і scripts/
+file_lines_target = 250 # орієнтир: понад нього — попередження, а не помилка
+test_file_lines = 600   # файл у tests/
+function_lines = 50     # разом із сигнатурою і docstring
+nesting_depth = 4       # вкладеність блоків, elif не рахується
+suppressions = 10       # noqa і type: ignore на весь riskua/
+file_exceptions = 3     # винятків із межі розміру файла
+fixture_kb = 200        # зразок файла джерела в tests/fixtures/
+
+[tool.riskua.limits.exceptions]
+# Файл не вкладається в межу і не ділиться за змістом (правила, розділ 10):
+# "riskua/шлях/до/файла.py" = { lines = 450, reason = "чому файл не ділиться за змістом" }
+
+[tool.riskua.tests]
+fast_seconds = 30                   # швидкий набір без бази й мережі
+coverage_core = 90                  # покриття пакетів core_packages
+coverage_total = 75                 # покриття всього riskua/ з ключем --all
+core_packages = ["domain", "report"]
+
+[tool.riskua.texts]
+# Пакети, де рядки не можуть містити кирилицю: правило повертає код, текст дає report/.
+code_only_packages = ["domain"]
+# Тексти для користувача і основи слів, яких у них не може бути (правила, розділ 7).
+user_text_paths = ["riskua/report", "riskua/bot/texts.py"]
+banned_stems = ["шахра", "аферист", "злочин", "кидал"]
+
+[tool.riskua.imports]
+# Шари згори вниз. Пакет імпортує лише пакети з нижчих шарів;
+# пакети одного шару один одного не імпортують.
+layers = [
+    ["bot"],
+    ["monitoring"],
+    ["usecases"],
+    ["billing", "report", "facts", "sources", "ingest"],
+    ["http"],
+    ["db", "domain"],
+    ["config", "clock", "logs"],
+]
+
+[tool.riskua.imports.forbidden]
+# Заборони понад шари: пакет -> модулі, які він не імпортує.
+# "riskua" означає будь-який інший пакет проєкту.
+domain = ["riskua", "asyncio", "os", "pathlib", "socket", "subprocess", "urllib"]
+bot = ["riskua.db", "riskua.http", "riskua.sources", "riskua.ingest", "riskua.facts"]
+
+[tool.riskua.imports.owners]
+# Бібліотека -> єдиний пакет, який її імпортує.
+httpx = "http"
+psycopg = "db"
+psycopg_pool = "db"
+aiogram = "bot"
+
+[tool.riskua.imports.single_place]
+# Оточення читає лише config.py, поточний час — лише clock.py.
+"os.environ" = "config"
+"os.environb" = "config"
+"os.getenv" = "config"
+"os.putenv" = "config"
+"dotenv" = "config"
+"datetime.datetime.now" = "clock"
+"datetime.datetime.utcnow" = "clock"
+"datetime.datetime.today" = "clock"
+"datetime.date.today" = "clock"
+"time.time" = "clock"
+"time.time_ns" = "clock"
+
+# ---------------------------------------------------------------------------
+# Інструменти
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = [".", "scripts"]
+# Лише Python: приклади коду в документах — частина тексту, а не код проєкту.
+include = ["*.py", "*.pyi", "**/pyproject.toml"]
+extend-exclude = ["app", "main.py", "tests/legacy"]
+
+[tool.ruff.lint]
+select = [
+    "A",     # тіні вбудованих імен
+    "ASYNC", # помилки в асинхронному коді
+    "B",     # типові помилки
+    "BLE",   # except Exception без потреби
+    "C4",    # генератори й comprehensions
+    "C90",   # складність функції
+    "DTZ",   # дати без часового поясу
+    "E",
+    "F",
+    "G",     # форматування в журналі
+    "I",     # порядок імпортів
+    "LOG",
+    "N",     # назви
+    "PGH",   # noqa і type: ignore лише з кодом
+    "PL",    # аргументи, гілки, return, числа без назви
+    "PT",    # стиль pytest
+    "RUF",   # зокрема зайві noqa
+    "S",     # безпека, зокрема SQL зі складених рядків
+    "SIM",
+    "T20",   # print замість журналу
+    "TID",   # заборонені бібліотеки, відносні імпорти
+    "UP",
+    "W",
+]
+# RUF001–RUF003 вважають «схожими на латиницю» звичайні українські літери (у, і, а, с) у
+# текстах, docstring і коментарях. Назви в коді лишаються латиницею: це стежить PLC2401.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR2004", "S101", "S105", "S106"] # числа й assert у перевірках, тестові токени
+"scripts/**" = ["S603", "T20"]                   # запуск інструментів і вивід у консоль
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-branches = 12
+max-returns = 6
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"urllib.request".msg = "Мережа — лише через riskua/http/ (правила, розділ 5)"
+"requests".msg = "Мережа — лише через riskua/http/ (правила, розділ 5)"
+"aiohttp".msg = "Мережа — лише через riskua/http/ (правила, розділ 5)"
+"playwright".msg = "Браузер не використовуємо (архітектура, незмінне правило 1)"
+"selenium".msg = "Браузер не використовуємо (архітектура, незмінне правило 1)"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+files = ["riskua", "scripts"]
+
+[tool.pytest.ini_options]
+minversion = "8.3"
+addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config", "-ra"]
+pythonpath = [".", "scripts"]
+testpaths = ["tests"]
+markers = [
+    "db: потрібна PostgreSQL у RISKUA_TEST_DATABASE_URL; запускається з check.py --all",
+    "net: справжня мережа; check.py такі тести не запускає",
+]
+
+[tool.coverage.run]
+source = ["riskua"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = ["if TYPE_CHECKING:", "if __name__ == .__main__.:"]

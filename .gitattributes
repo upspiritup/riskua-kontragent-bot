@@ -1,0 +1,6 @@
+# Міграції й файли для Linux — завжди з \n, навіть після клонування в Windows:
+# так не змінюються контрольні суми міграцій і не ламаються скрипти оболонки.
+*.sql text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
